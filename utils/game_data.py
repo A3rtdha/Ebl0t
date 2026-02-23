@@ -1,13 +1,25 @@
-# Список всех карт Valorant
-MAP_POOL = [
-    "Ascent", "Bind", "Breeze", "Fracture", "Haven", 
-    "Icebox", "Lotus", "Pearl", "Split", "Sunset"
-]
+"""
+game_data.py — читает карты и агентов из data/game_data.json.
+Чтобы добавить нового агента или карту — просто правь JSON файл, не трогая код.
+"""
+import json
+import os
 
-# Список всех агентов
-AGENT_POOL = [
-    "Brimstone", "Viper", "Omen", "Killjoy", "Cypher", "Sova", 
-    "Sage", "Phoenix", "Jett", "Reyna", "Raze", "Breach", 
-    "Skye", "Yoru", "Astra", "KAY/O", "Chamber", "Neon", 
-    "Fade", "Harbor", "Gekko", "Deadlock", "Iso", "Clove"
-]
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "game_data.json")
+
+def _load():
+    with open(_DATA_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def get_maps() -> list[str]:
+    return _load()["maps"]
+
+def get_agents(role: str = "Все") -> list[str]:
+    return _load()["agents"].get(role, _load()["agents"]["Все"])
+
+def get_all_roles() -> list[str]:
+    return [r for r in _load()["agents"].keys() if r != "Все"]
+
+# Обратная совместимость — старый код использовал MAP_POOL и AGENT_POOL напрямую
+MAP_POOL   = get_maps()
+AGENT_POOL = get_agents()

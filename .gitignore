@@ -1,13 +1,51 @@
+# ─── Секреты (никогда не коммитить) ─────────────────────────────
+# Discord токен, Henrik API ключ, прокси — всё в .env
 .env
+.env.*
+!.env.example
+
+# База: Discord ID ↔ Riot ID, ELO, история матчей
+data/data.json
+data/active_matches.json
+data.json
+
+# ─── Python ──────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
+.Python
 .venv/
 venv/
-.env.local
-*.log
-.idea/
-.vscode/
+env/
 *.egg-info/
+*.egg
+.eggs/
 dist/
 build/
+*.manifest
+
+# ─── IDE & editors ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── OS junk ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Logs & temp ────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ─── Testing & tools ─────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/

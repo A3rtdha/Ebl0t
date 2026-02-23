@@ -1,6 +1,7 @@
 import disnake
 from disnake.ext import commands
 from ui.lobby_views import SetupModeView
+from utils import guild_setup, network_retry
 
 class Customs(commands.Cog):
     def __init__(self, bot):
@@ -8,27 +9,32 @@ class Customs(commands.Cog):
 
     @commands.slash_command(name="custom", description="Создать кастомную игру Valorant")
     async def create_custom(self, inter: disnake.ApplicationCommandInteraction):
-        # 1. Моментально отвечаем Дискорду "Я думаю...", чтобы избежать ошибки 3-х секунд
-        await inter.response.defer()
+        await network_retry.retry_on_network(lambda: inter.response.defer())
 
-        # Создаем красивый Embed
+        category, invite_channel, customs_channel = await guild_setup.get_or_create_hub(inter.guild)
+
+        # Роль по имени или по ID (на случай другого написания на сервере)
+        role = disnake.utils.get(inter.guild.roles, name="Valorant") or inter.guild.get_role(1474962323021234308)
+        ping_line = f"\nПинг: {role.mention}" if role else ""
+
+        invite_text = (
+            f"🚀 **{inter.author.display_name}** собирает кастомку!\n"
+            f"Переходите в {inter.channel.mention}, чтобы нажать кнопку участия.{ping_line}"
+        )
+        await invite_channel.send(invite_text)
+
         embed = disnake.Embed(
             title="🎮 Настройка Valorant Custom",
             description=(
-                "Вызвавший эту команду становится **Хостом**.\n"
-                "Выберите режим формирования команд и пика:"
+                f"Категория матча: **{category.name}**\n"
+                f"Создавать кастомки: {customs_channel.mention} (писать могут только с ролью Valorant).\n\n"
+                f"Выберите режим:"
             ),
             color=disnake.Color.red()
         )
-        embed.add_field(name="🎲 RANDOM", value="Быстрый старт, полная случайность.", inline=False)
-        embed.add_field(name="🏆 VOTED", value="Выбор капитанов, баны карт и пресеты ролей.", inline=False)
-
-        # Вызываем кнопки из нашего UI файла
+        
         view = SetupModeView()
-
-        # 2. Отправляем итоговое сообщение (редактируем наше "отложенное" сообщение)
         await inter.edit_original_response(embed=embed, view=view)
 
-# Эта функция обязательна, чтобы main.py смог подгрузить этот файл
 def setup(bot):
     bot.add_cog(Customs(bot))

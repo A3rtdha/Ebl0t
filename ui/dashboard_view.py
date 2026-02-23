@@ -1,15 +1,15 @@
 import disnake
-from utils import valo_logic
+import re
+from utils import valo_logic, match_manager, db_manager
+from utils import guild_setup
+from utils.riot_api import rank_emoji
 
-# --- КНОПКИ ВЫБОРА КАРТЫ ---
+# --- ВЫБОР КАРТЫ ---
 class MapSelectionView(disnake.ui.View):
     def __init__(self, host, dashboard_view, maps_list):
         super().__init__(timeout=60)
         self.host = host
-        self.dashboard_view = dashboard_view # Ссылка на главное меню
-        self.maps_list = maps_list
-        
-        # Генерируем кнопки для карт
+        self.dashboard_view = dashboard_view
         for map_name in maps_list:
             self.add_item(MapButton(map_name))
 
@@ -17,108 +17,105 @@ class MapButton(disnake.ui.Button):
     def __init__(self, map_name):
         super().__init__(label=map_name, style=disnake.ButtonStyle.secondary, custom_id=f"map_{map_name}")
         self.map_name = map_name
-
-    async def callback(self, inter: disnake.MessageInteraction):
-        view: MapSelectionView = self.view
+    async def callback(self, inter):
+        view = self.view
         if inter.author.id != view.host.id:
-            await inter.response.send_message("Выбирать карту может только Хост!", ephemeral=True)
-            return
-        
-        # 1. Записываем выбранную карту в главное меню
+            return await inter.response.send_message("Только Хост!", ephemeral=True)
         view.dashboard_view.selected_map = self.map_name
-        
-        # 2. Находим кнопку MAP в главном меню и выключаем её
         for child in view.dashboard_view.children:
             if child.custom_id == "dash_map":
                 child.disabled = True
                 child.style = disnake.ButtonStyle.gray
-                child.label = f"🗺️ {self.map_name}" # Меняем название кнопки на карту
-        
-        # 3. Обновляем эмбед и возвращаем главное меню
+                child.label = f"🗺️ {self.map_name}"
         await view.dashboard_view.update_message(inter)
 
 
 # --- ГЛАВНОЕ МЕНЮ ---
 class MatchDashboardView(disnake.ui.View):
-    def __init__(self, host: disnake.Member, players: list, mode: str):
+    def __init__(self, host: disnake.Member, players: list, mode: str, source_channel: disnake.VoiceChannel):
         super().__init__(timeout=None)
         self.host = host
         self.players = players
         self.mode = mode
+        self.source_channel = source_channel
         
-        # Хранилище данных матча (State)
         self.team1 = []
         self.team2 = []
-        self.agent_assignments = {} # Словарь {Member: "AgentName"}
+        self.agent_assignments = {}
         self.selected_map = None
 
-    # Вспомогательная функция для перерисовки Эмбеда
+        # Кнопка START по умолчанию выключена
+        for child in self.children:
+            if child.custom_id == "dash_start":
+                child.disabled = True
+                child.style = disnake.ButtonStyle.gray
+
     async def update_message(self, inter: disnake.MessageInteraction):
-        # Берем старый эмбед, но очищаем поля, чтобы перезаписать их
+        is_ready = bool((self.team1 or self.team2) and self.selected_map and self.agent_assignments)
+
+        for child in self.children:
+            if child.custom_id == "dash_start":
+                if is_ready:
+                    child.disabled = False
+                    child.style = disnake.ButtonStyle.green
+                    child.label = "🚀 START MATCH"
+                else:
+                    child.disabled = True
+                    child.style = disnake.ButtonStyle.gray
+                    child.label = "⌛ WAITING SETUP..."
+
         embed = inter.message.embeds[0]
         embed.clear_fields()
-
-        # 1. Поле КОМАНДЫ (если они уже сформированы)
-        if self.team1 or self.team2:
-            t1_desc = "\n".join([m.mention for m in self.team1]) if self.team1 else "..."
-            t2_desc = "\n".join([m.mention for m in self.team2]) if self.team2 else "..."
-            embed.description = f"**🔵 Атака:**\n{t1_desc}\n\n**🔴 Защита:**\n{t2_desc}"
         
-        # 2. Поле КАРТА (если выбрана)
-        if self.selected_map:
-            embed.add_field(name="🗺️ Карта", value=f"**{self.selected_map}**", inline=False)
+        map_val = f"**{self.selected_map}**" if self.selected_map else "Не выбрана"
+        embed.add_field(name="🗺️ Карта", value=map_val, inline=False)
 
-        # 3. Поле АГЕНТЫ (если розданы)
-        if self.agent_assignments:
-            # Сортируем текст, чтобы он выглядел красиво (сначала команда 1, потом 2)
+        # Подтягиваем данные о рангах одним запросом
+        all_players = self.team1 + self.team2
+        db_data = db_manager.get_players_bulk([m.id for m in all_players]) if all_players else {}
+
+        def format_team(team_list):
+            if not team_list: return "..."
             lines = []
-            
-            # Если команды есть, делим визуально
-            if self.team1:
-                lines.append("**🔵 Атака:**")
-                for p in self.team1:
-                    agent = self.agent_assignments.get(p, "???")
-                    lines.append(f"> {p.mention} — **{agent}**")
-                
-                lines.append("\n**🔴 Защита:**")
-                for p in self.team2:
-                    agent = self.agent_assignments.get(p, "???")
-                    lines.append(f"> {p.mention} — **{agent}**")
-            else:
-                # Если команд еще нет, просто списком
-                for p, agent in self.agent_assignments.items():
-                    lines.append(f"{p.mention} — **{agent}**")
+            t_weight = 0
+            for member in team_list:
+                agent = self.agent_assignments.get(member, None)
+                entry = db_data.get(member.id)
+                rank_str = ""
+                if entry:
+                    emoji = rank_emoji(entry["rank"])
+                    rank_str = f" {emoji} *{entry['rank']}*"
+                    t_weight += entry.get("rank_weight", 0)
+                if agent:
+                    lines.append(f"{member.mention}{rank_str} — **{agent}**")
+                else:
+                    lines.append(f"{member.mention}{rank_str}")
+            if t_weight:
+                lines.append(f"\n*Рейтинг: {t_weight}*")
+            return "\n".join(lines)
 
-            full_text = "\n".join(lines)
-            embed.add_field(name="🕵️ Агенты", value=full_text, inline=False)
+        embed.add_field(name="🔵 Атака", value=format_team(self.team1), inline=True)
+        embed.add_field(name="🔴 Защита", value=format_team(self.team2), inline=True)
+        
+        embed.color = disnake.Color.green() if is_ready else disnake.Color.blurple()
 
-        # Редактируем сообщение с обновленным View (кнопками)
         await inter.response.edit_message(embed=embed, view=self)
 
-
     # --- КНОПКИ ---
-
     @disnake.ui.button(label="👥 TEAM", style=disnake.ButtonStyle.blurple, custom_id="dash_team", row=0)
     async def team_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         if inter.author.id != self.host.id:
             return await inter.response.send_message("Только хост!", ephemeral=True)
-
-        # Логика
         self.team1, self.team2 = valo_logic.split_teams(self.players)
-        
-        # Выключаем кнопку
         button.disabled = True
         button.style = disnake.ButtonStyle.gray
-        
         await self.update_message(inter)
 
     @disnake.ui.button(label="🗺️ MAP", style=disnake.ButtonStyle.blurple, custom_id="dash_map", row=0)
     async def map_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         if inter.author.id != self.host.id:
             return await inter.response.send_message("Только хост!", ephemeral=True)
-            
         random_maps = valo_logic.get_random_maps()
-        # Передаем self (этот класс), чтобы MapSelectionView мог вернуть нас обратно
         view = MapSelectionView(self.host, self, random_maps)
         await inter.response.edit_message(view=view)
 
@@ -126,38 +123,79 @@ class MatchDashboardView(disnake.ui.View):
     async def agents_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         if inter.author.id != self.host.id:
             return await inter.response.send_message("Только хост!", ephemeral=True)
-
-        # Раздаем агентов
         self.agent_assignments = valo_logic.assign_random_agents(self.players)
-        
-        # Выключаем эту кнопку
         button.disabled = True
         button.style = disnake.ButtonStyle.gray
-        
-        # ВКЛЮЧАЕМ кнопку REROLL (ищем её по custom_id)
         for child in self.children:
-            if child.custom_id == "dash_reroll":
-                child.disabled = False
-        
+            if child.custom_id == "dash_reroll": child.disabled = False
         await self.update_message(inter)
 
-    # --- КНОПКА REROLL (Изначально выключена, disabled=True) ---
-    @disnake.ui.button(label="🔄 REROLL AGENT", style=disnake.ButtonStyle.red, custom_id="dash_reroll", disabled=True, row=1)
+    @disnake.ui.button(label="🔄 REROLL", style=disnake.ButtonStyle.red, custom_id="dash_reroll", disabled=True, row=1)
     async def reroll_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        # Проверка: нажать может любой игрок, который есть в списке участников
         if inter.author not in self.players:
-            return await inter.response.send_message("Вы не участвуете в этом матче!", ephemeral=True)
-        
-        # Если агенты еще не розданы (на всякий случай)
+            return await inter.response.send_message("Вы не участвуете в матче!", ephemeral=True)
         if not self.agent_assignments:
-             return await inter.response.send_message("Агенты еще не розданы!", ephemeral=True)
-
-        # Выдаем нового агента конкретно нажавшему
+            return await inter.response.send_message("Агенты еще не розданы!", ephemeral=True)
         new_agent = valo_logic.get_random_agent()
         self.agent_assignments[inter.author] = new_agent
-        
-        # Обновляем эмбед
         await self.update_message(inter)
+        await inter.followup.send(f"🎲 Вам выпал: **{new_agent}**", ephemeral=True)
+
+    @disnake.ui.button(label="⌛ WAITING SETUP...", style=disnake.ButtonStyle.gray, custom_id="dash_start", disabled=True, row=2)
+    async def start_match_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        if inter.author.id != self.host.id:
+            return await inter.response.send_message("Только Хост может начать матч!", ephemeral=True)
         
-        # Подтверждение (эфемеричное), чтобы игрок понял, что сработало
-        await inter.followup.send(f"🎲 Вам выпал новый агент: **{new_agent}**", ephemeral=True)
+        await inter.response.defer()
+        
+        lobby_id = "0000"
+        if self.source_channel:
+            match = re.search(r'\((\d+)\)', self.source_channel.name)
+            if match: lobby_id = match.group(1)
+
+        guild = inter.guild
+        category, _, _ = await guild_setup.get_or_create_hub(guild)
+        limit_t1 = len(self.team1)
+        limit_t2 = len(self.team2)
+
+        try:
+            vc_team1 = await guild.create_voice_channel(name=f"🟦 Attack #{lobby_id}", category=category, user_limit=limit_t1)
+            vc_team2 = await guild.create_voice_channel(name=f"🟥 Defense #{lobby_id}", category=category, user_limit=limit_t2)
+        except Exception as e:
+            return await inter.followup.send(f"Ошибка: {e}", ephemeral=True)
+
+        # team1 = Attack (🟦), team2 = Defense (🟥) — по именам каналов
+        match_manager.save_active_match(
+            host_id=self.host.id,
+            team1_channel_id=vc_team1.id,
+            team2_channel_id=vc_team2.id,
+            lobby_id=lobby_id,
+            team1_ids=self.team1,
+            team2_ids=self.team2,
+            team1_side="attack",
+        )
+
+        async def move_player(member, channel):
+            try:
+                if member.voice: await member.move_to(channel)
+            except: pass
+
+        for m in self.team1: await move_player(m, vc_team1)
+        for m in self.team2: await move_player(m, vc_team2)
+
+        try:
+            if self.source_channel: await self.source_channel.delete()
+        except: pass
+
+        embed = inter.message.embeds[0]
+        embed.title = f"✅ МАТЧ #{lobby_id} ЗАПУЩЕН!"
+        embed.color = disnake.Color.green()
+        embed.clear_fields()
+        embed.description = f"**Карта:** {self.selected_map or '—'}\n\n📢 **Голосовые каналы созданы!**"
+        embed.add_field(name="Каналы", value=f"{vc_team1.mention}\n{vc_team2.mention}")
+        embed.set_footer(text="Хост может завершить игру командой /finish")
+
+        for child in self.children: child.disabled = True
+        
+        await inter.edit_original_response(embed=embed, view=self)
+        await inter.channel.send(f"{self.host.mention}, GL HF!")

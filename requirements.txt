@@ -1,2 +1,8 @@
 disnake
 python-dotenv
+aiohttp
+pytesseract
+opencv-python-headless
+pillow
+numpy
+rapidfuzz>=3.0.0

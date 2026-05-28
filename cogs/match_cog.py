@@ -16,12 +16,21 @@ match_cog.py — завершение матча и обработка резу�
 
 import disnake
 from disnake.ext import commands
-from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot_api
-from ui.modals import MatchResultModal
+from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot_api, guild_setup, ui_theme
+from ui.modals import ManualScoreboardModal
+from ui.match_outcome import prompt_match_outcome, team_label
+from utils.manual_scoreboard import parsed_to_manual_text, MANUAL_FORMAT_HELP
 import asyncio
 import logging
+import uuid
+from collections import defaultdict
 
 log = logging.getLogger(__name__)
+
+# Один активный флоу результата на канал (OCR → исход → wizard → ELO)
+_result_flow_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_active_result_channels: set[int] = set()
+_wizard_sessions: dict[int, str] = {}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -47,15 +56,9 @@ class MatchCog(commands.Cog):
                     )
             return await inter.response.send_message("❌ Нет активного матча.", ephemeral=True)
 
-        # Удаляем голосовые каналы
-        for ch_id in [match_data.get("team1_vc"), match_data.get("team2_vc")]:
-            if ch_id:
-                ch = inter.guild.get_channel(ch_id)
-                if ch:
-                    try:
-                        await ch.delete()
-                    except Exception:
-                        pass
+        # Собираем игроков из командных каналов в один «регруп»-канал,
+        # чтобы лобби не разваливалось после /finish
+        await _regroup_voice_channels(inter.guild, match_data)
 
         match_manager.remove_active_match(inter.author.id)
 
@@ -69,20 +72,72 @@ class MatchCog(commands.Cog):
                 guild=inter.guild,
             )
 
-        embed = disnake.Embed(
-            title="📸 Загрузи скриншот результатов",
+        embed = ui_theme.brand_embed(
+            title="📸  Загрузи скриншот результатов",
             description=(
-                "Прикрепи **скриншот таблицы результатов** (scoreboard) из Valorant "
-                "к следующему сообщению в этом чате.\n\n"
-                "Бот автоматически распознает победителя, счёт и статистику игроков, "
-                "а затем обновит Custom ELO всех участников.\n\n"
-                "Если игрок не привязал `/link` — бот спросит хоста, кто есть кто.\n\n"
-                "Или нажми **«Ввести вручную»**, если скриншота нет."
+                "Прикрепи **скриншот таблицы (scoreboard)** из Valorant "
+                "к следующему сообщению в этом чате.\n"
+                f"{ui_theme.DIVIDER}\n"
+                "▸ Бот распознает статистику игроков\n"
+                "▸ Ты выберешь **победителя** и **счёт**\n"
+                "▸ Custom ELO обновится автоматически\n\n"
+                "Нет скриншота? Жми **«Ввести вручную»**."
             ),
-            color=disnake.Color.orange(),
+            color=ui_theme.COLOR_WARN,
         )
-        view = ManualFallbackView(host=inter.author, channel=inter.channel)
+        view = ManualFallbackView(
+            host=inter.author, channel=inter.channel, match_data=match_data, bot=self.bot,
+        )
         await inter.response.send_message(embed=embed, view=view)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Перенос игроков в общий канал после /finish (вместо удаления)
+# ══════════════════════════════════════════════════════════════════════
+
+async def _regroup_voice_channels(guild: disnake.Guild, match_data: dict):
+    """
+    После /finish переносим всех из командных каналов в один канал
+    «перегруппировки», затем удаляем опустевшие командные каналы.
+    Так лобби не разваливается — все остаются вместе.
+    """
+    vc_ids = [match_data.get("team1_vc"), match_data.get("team2_vc")]
+    team_vcs = []
+    for cid in vc_ids:
+        if not cid:
+            continue
+        ch = guild.get_channel(cid)
+        if isinstance(ch, disnake.VoiceChannel):
+            team_vcs.append(ch)
+
+    members = []
+    for ch in team_vcs:
+        members.extend(ch.members)
+
+    regroup = None
+    if members:
+        try:
+            category, _, _ = await guild_setup.get_or_create_hub(guild)
+            lobby_id = match_data.get("lobby_id", "")
+            regroup = await guild.create_voice_channel(
+                name=f"🔁 Лобби #{lobby_id}", category=category,
+            )
+            for m in members:
+                try:
+                    await m.move_to(regroup)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f"Не удалось создать регруп-канал: {e}")
+
+    # Удаляем теперь уже пустые командные каналы
+    for ch in team_vcs:
+        try:
+            await ch.delete()
+        except Exception:
+            pass
+
+    return regroup
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -90,21 +145,127 @@ class MatchCog(commands.Cog):
 # ══════════════════════════════════════════════════════════════════════
 
 class ManualFallbackView(disnake.ui.View):
-    def __init__(self, host: disnake.Member, channel):
-        super().__init__(timeout=300)
+    def __init__(self, host: disnake.Member, channel, match_data: dict, bot):
+        super().__init__(timeout=600)
         self.host = host
         self.channel = channel
+        self.match_data = match_data
+        self.bot = bot
 
     @disnake.ui.button(label="✏️ Ввести вручную", style=disnake.ButtonStyle.secondary)
     async def manual_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         if inter.author.id != self.host.id:
             return await inter.response.send_message("Только хост может завершить матч.", ephemeral=True)
-        # Снимаем регистрацию ожидания скриншота
         listener = inter.bot.get_cog("ScreenshotListener")
         if listener:
             listener.unregister(inter.channel.id)
         self.stop()
-        await inter.response.send_modal(modal=MatchResultModal(inter.bot, self.channel))
+        await inter.response.send_modal(
+            ManualScoreboardModal(
+                inter.bot, self.channel, self.host, inter.guild, self.match_data,
+            )
+        )
+
+
+class OcrReviewView(disnake.ui.View):
+    """Превью после OCR: подтвердить или открыть ручное редактирование."""
+
+    def __init__(self, host, channel, guild, parsed: dict, match_data: dict, bot, ocr_session: int = 0):
+        super().__init__(timeout=600)
+        self.host = host
+        self.channel = channel
+        self.guild = guild
+        self.parsed = parsed
+        self.match_data = match_data
+        self.bot = bot
+        self.ocr_session = ocr_session
+        self._done = False
+
+    def _stale(self) -> bool:
+        listener = self.bot.get_cog("ScreenshotListener")
+        if not listener:
+            return False
+        return listener.ocr_session(self.channel.id) != self.ocr_session
+
+    async def _reject_stale(self, inter: disnake.MessageInteraction) -> bool:
+        if self._stale():
+            self.stop()
+            await inter.response.send_message(
+                "Это превью устарело — обработан другой скрин или матч уже идёт дальше.",
+                ephemeral=True,
+            )
+            return True
+        return False
+
+    @disnake.ui.button(label="✅ Всё верно", style=disnake.ButtonStyle.green)
+    async def confirm_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        if inter.author.id != self.host.id:
+            return await inter.response.send_message("Только хост.", ephemeral=True)
+        if self._done or await self._reject_stale(inter):
+            return
+        self._done = True
+        self.stop()
+        listener = inter.bot.get_cog("ScreenshotListener")
+        if listener:
+            listener.unregister(inter.channel.id)
+        await inter.response.edit_message(content="✅ Дальше — выбор победителя и счёта…", view=None)
+        await prompt_match_outcome(
+            self.channel, self.host, self.guild,
+            self.parsed, self.match_data, self.bot,
+        )
+
+    @disnake.ui.button(label="✏️ Исправить вручную", style=disnake.ButtonStyle.primary)
+    async def edit_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        if inter.author.id != self.host.id:
+            return await inter.response.send_message("Только хост.", ephemeral=True)
+        if self._done or await self._reject_stale(inter):
+            return
+        self._done = True
+        self.stop()
+        prefill = parsed_to_manual_text(self.parsed)
+        await inter.response.send_modal(
+            ManualScoreboardModal(
+                inter.bot, self.channel, self.host, inter.guild,
+                self.match_data, initial_text=prefill,
+            )
+        )
+
+    @disnake.ui.button(label="❌ Отмена", style=disnake.ButtonStyle.secondary)
+    async def cancel_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        if inter.author.id != self.host.id:
+            return await inter.response.send_message("Только хост.", ephemeral=True)
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        listener = inter.bot.get_cog("ScreenshotListener")
+        if listener:
+            listener.unregister(inter.channel.id)
+        await inter.response.edit_message(content="❌ Обработка отменена.", view=None)
+
+
+class ParseFailView(disnake.ui.View):
+    def __init__(self, host, channel, guild, match_data: dict, bot):
+        super().__init__(timeout=600)
+        self.host = host
+        self.channel = channel
+        self.guild = guild
+        self.match_data = match_data
+        self.bot = bot
+
+    @disnake.ui.button(label="✏️ Ввести scoreboard вручную", style=disnake.ButtonStyle.primary)
+    async def manual_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        if inter.author.id != self.host.id:
+            return await inter.response.send_message("Только хост.", ephemeral=True)
+        self.stop()
+        listener = inter.bot.get_cog("ScreenshotListener")
+        if listener:
+            listener.unregister(inter.channel.id)
+        await inter.response.send_modal(
+            ManualScoreboardModal(
+                inter.bot, self.channel, self.host, inter.guild, self.match_data,
+            )
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -114,10 +275,19 @@ class ManualFallbackView(disnake.ui.View):
 class ScreenshotListener(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # {channel_id: {"host_id": int, "match_data": dict, "guild": Guild}}
+        # {channel_id: {"host_id", "match_data", "guild"}}
         self.pending: dict[int, dict] = {}
+        self._ocr_generation: dict[int, int] = {}
+        self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def ocr_session(self, channel_id: int) -> int:
+        return self._ocr_generation.get(channel_id, 0)
 
     def register(self, channel_id: int, host_id: int, match_data: dict, guild):
+        self.unregister(channel_id)
+        self._ocr_generation[channel_id] = self._ocr_generation.get(channel_id, 0) + 1
+        _active_result_channels.discard(channel_id)
+        _wizard_sessions.pop(channel_id, None)
         self.pending[channel_id] = {
             "host_id":    host_id,
             "match_data": match_data,
@@ -132,48 +302,108 @@ class ScreenshotListener(commands.Cog):
         if message.author.bot:
             return
 
-        pending = self.pending.get(message.channel.id)
-        if not pending or message.author.id != pending["host_id"]:
+        ch_id = message.channel.id
+        lock = self._locks[ch_id]
+        if lock.locked():
             return
 
-        # Ищем изображение среди вложений
-        image_att = next(
-            (a for a in message.attachments if a.content_type and a.content_type.startswith("image/")),
-            None,
-        )
-        if image_att is None:
-            return
+        async with lock:
+            pending = self.pending.get(ch_id)
+            if not pending or message.author.id != pending["host_id"]:
+                return
 
-        # Регистрацию снимаем сразу — один скриншот, один раз
-        self.unregister(message.channel.id)
+            image_att = next(
+                (a for a in message.attachments if a.content_type and a.content_type.startswith("image/")),
+                None,
+            )
+            if image_att is None:
+                return
 
-        status = await message.channel.send("🔍 Анализирую скриншот... подожди несколько секунд.")
+            pending_data = self.pending.pop(ch_id, None)
+            if not pending_data:
+                return
+            ocr_session = self._ocr_generation.get(ch_id, 0)
 
-        try:
-            image_bytes  = await image_att.read()
-            content_type = image_att.content_type or "image/png"
-            parsed       = await screenshot_parser.parse_screenshot(image_bytes, content_type)
-
-            if parsed is None:
-                return await status.edit(content=(
-                    "❌ Не удалось распознать скриншот.\n"
-                    "Убедись, что это **экран результатов Valorant** (scoreboard после матча).\n"
-                    "Если нужно — введи результат вручную через `/finish`."
-                ))
-
-            await status.delete()
-            await _start_result_flow(
-                channel=message.channel,
-                host=message.author,
-                guild=pending["guild"],
-                parsed=parsed,
-                match_data=pending["match_data"],
-                bot=self.bot,
+            status = await message.channel.send(
+                "🔍 Анализирую скриншот... подожди несколько секунд."
             )
 
-        except Exception as e:
-            log.exception("Ошибка при обработке скриншота")
-            await status.edit(content=f"❌ Внутренняя ошибка: `{e}`")
+            try:
+                image_bytes  = await image_att.read()
+                content_type = image_att.content_type or "image/png"
+                parsed       = await screenshot_parser.parse_screenshot(
+                    image_bytes, content_type
+                )
+
+                if self._ocr_generation.get(ch_id) != ocr_session:
+                    await status.delete()
+                    return
+
+                if parsed is None:
+                    return await status.edit(
+                        content=(
+                            "❌ Не удалось распознать скриншот.\n"
+                            "Введи данные **вручную** — кнопка ниже.\n\n"
+                            f"{MANUAL_FORMAT_HELP}"
+                        ),
+                        view=ParseFailView(
+                            host=message.author,
+                            channel=message.channel,
+                            guild=pending_data["guild"],
+                            match_data=pending_data["match_data"],
+                            bot=self.bot,
+                        ),
+                    )
+
+                await status.delete()
+
+                preview_lines = []
+                for p in parsed.get("players", [])[:12]:
+                    preview_lines.append(
+                        f"`{(p.get('riot_id') or '?')}` "
+                        f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)} "
+                        f"ACS:{p.get('acs', 0)}"
+                    )
+                preview = ui_theme.brand_embed(
+                    title="👀  Проверь распознавание",
+                    description=(
+                        "Сверь ники и статистику со скриншотом.\n"
+                        "✅ **Всё верно** — дальше выбор победителя и счёта\n"
+                        "✏️ **Исправить вручную** — если OCR ошибся"
+                    ),
+                    color=ui_theme.COLOR_WARN,
+                )
+                preview.add_field(
+                    name="Распознано",
+                    value="\n".join(preview_lines) or "—",
+                    inline=False,
+                )
+
+                await message.channel.send(
+                    embed=preview,
+                    view=OcrReviewView(
+                        host=message.author,
+                        channel=message.channel,
+                        guild=pending_data["guild"],
+                        parsed=parsed,
+                        match_data=pending_data["match_data"],
+                        bot=self.bot,
+                        ocr_session=ocr_session,
+                    ),
+                )
+
+            except Exception as e:
+                log.exception("Ошибка при обработке скриншота")
+                await status.edit(
+                    content=f"❌ Внутренняя ошибка: `{e}`",
+                    view=ParseFailView(
+                        host=message.author,
+                        channel=message.channel,
+                        guild=pending_data["guild"],
+                        match_data=pending_data["match_data"],
+                        bot=self.bot,
+                    ),
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -186,6 +416,31 @@ async def _start_result_flow(channel, host, guild, parsed: dict, match_data: dic
     Разделяет игроков на «опознанных» и «неопознанных»,
     запускает поочерёдный dropdown для неопознанных.
     """
+    ch_id = channel.id
+    flow_lock = _result_flow_locks[ch_id]
+    if flow_lock.locked():
+        try:
+            await channel.send(
+                "⚠️ Этот матч уже обрабатывается — дождись завершения или отмени лишние сообщения.",
+                delete_after=20,
+            )
+        except Exception:
+            pass
+        return
+
+    async with flow_lock:
+        if ch_id in _active_result_channels:
+            return
+        _active_result_channels.add(ch_id)
+        try:
+            await _start_result_flow_locked(channel, host, guild, parsed, match_data, bot)
+        except Exception:
+            _active_result_channels.discard(ch_id)
+            _wizard_sessions.pop(ch_id, None)
+            raise
+
+
+async def _start_result_flow_locked(channel, host, guild, parsed: dict, match_data: dict, bot=None):
     players_raw: list[dict] = parsed.get("players", [])
     team1_ids   = match_data.get("team1_ids", [])
     team2_ids   = match_data.get("team2_ids", [])
@@ -271,12 +526,18 @@ async def _matching_wizard(
     Левые ники на скрине не добавляем — только сопоставляем участников.
     """
     matched_stats = dict(already_matched)
-    # Копия списка ников: при выборе убираем, чтобы не предлагать повторно
     available_nicks = list(unmatched_nicks)
     total = len(unmatched_discord_ids)
     inter_bot = bot
+    session = str(uuid.uuid4())
+    _wizard_sessions[channel.id] = session
+
+    def _alive() -> bool:
+        return _wizard_sessions.get(channel.id) == session
 
     async def process_next(idx: int):
+        if not _alive():
+            return
         if idx >= total:
             await _finalize_match(
                 channel=channel,
@@ -306,12 +567,16 @@ async def _matching_wizard(
             host=host,
             discord_id=discord_id,
             available_nicks=available_nicks,
+            wizard_session=session,
+            channel_id=channel.id,
             on_pick=lambda riot_id, stats: on_picked(discord_id, riot_id, stats, idx),
             on_skip=lambda: on_skipped(idx),
         )
         await channel.send(embed=embed, view=view)
 
     async def on_picked(discord_id: int, riot_id: str, stats: dict, idx: int):
+        if not _alive():
+            return
         matched_stats[discord_id] = stats
         # Убираем выбранный ник из списка для следующих
         for i, n in enumerate(available_nicks):
@@ -329,6 +594,8 @@ async def _matching_wizard(
         await process_next(idx + 1)
 
     async def on_skipped(idx: int):
+        if not _alive():
+            return
         await process_next(idx + 1)
 
     await process_next(0)
@@ -515,14 +782,19 @@ class PickNickView(disnake.ui.View):
     Хост выбирает, какой ник на скрине — это данный участник.
     """
     def __init__(self, host, discord_id: int, available_nicks: list,
-                 on_pick, on_skip):
+                 on_pick, on_skip, wizard_session: str, channel_id: int):
         super().__init__(timeout=180)
         self.host = host
         self.discord_id = discord_id
         self.available_nicks = available_nicks  # [{"riot_id", "stats"}, ...]
         self.on_pick = on_pick
         self.on_skip = on_skip
+        self.wizard_session = wizard_session
+        self.channel_id = channel_id
         self._responded = False
+
+    def _stale(self) -> bool:
+        return _wizard_sessions.get(self.channel_id) != self.wizard_session
 
         options = []
         for i, n in enumerate(available_nicks[:25]):
@@ -547,7 +819,14 @@ class PickNickView(disnake.ui.View):
     async def _select_callback(self, inter: disnake.MessageInteraction):
         if inter.author.id != self.host.id:
             return await inter.response.send_message("Только хост может сопоставлять игроков.", ephemeral=True)
-        if self._responded:
+        if self._responded or self._stale():
+            if self._stale() and not self._responded:
+                self._responded = True
+                self.stop()
+                return await inter.response.send_message(
+                    "Этот шаг устарел — матч уже обработан другим сообщением.",
+                    ephemeral=True,
+                )
             return
         self._responded = True
         self.stop()
@@ -571,6 +850,13 @@ class PickNickView(disnake.ui.View):
             return await inter.response.send_message("Только хост может управлять этим.", ephemeral=True)
         if self._responded:
             return
+        if self._stale():
+            self._responded = True
+            self.stop()
+            return await inter.response.send_message(
+                "Этот шаг устарел — матч уже обработан.",
+                ephemeral=True,
+            )
         self._responded = True
         self.stop()
         await inter.response.edit_message(
@@ -581,7 +867,7 @@ class PickNickView(disnake.ui.View):
         await self.on_skip()
 
     async def on_timeout(self):
-        if not self._responded:
+        if not self._responded and not self._stale():
             self._responded = True
             await self.on_skip()
 
@@ -596,7 +882,15 @@ async def _finalize_match(channel, parsed: dict, match_data: dict,
     Считает ELO для всех сопоставленных игроков и публикует итог.
     matched_stats: {discord_id: {team, kills, deaths, assists, acs, hs_percent}}
     """
-    winner_side = parsed.get("winner", "?")
+    try:
+        await _finalize_match_body(channel, parsed, match_data, matched_stats, linked)
+    finally:
+        _active_result_channels.discard(channel.id)
+        _wizard_sessions.pop(channel.id, None)
+
+
+async def _finalize_match_body(channel, parsed: dict, match_data: dict,
+                               matched_stats: dict, linked: dict):
     score_atk   = parsed.get("score_attack", "?")
     score_def   = parsed.get("score_defense", "?")
     players_raw = parsed.get("players", [])
@@ -605,27 +899,56 @@ async def _finalize_match(channel, parsed: dict, match_data: dict,
     team2_ids  = match_data.get("team2_ids", [])
     team1_side = match_data.get("team1_side", "attack")
     team2_side = "defense" if team1_side == "attack" else "attack"
+    winner_side = parsed.get("winner", "?")
+    winner_team = parsed.get("winner_team")
 
-    if winner_side == team1_side:
-        winner_ids   = [uid for uid in team1_ids if uid in matched_stats]
-        loser_ids    = [uid for uid in team2_ids if uid in matched_stats]
-        winner_label = "🔵 Команда 1 (Атака)"
+    if winner_team == 1:
+        winner_ids = [uid for uid in team1_ids if uid in matched_stats]
+        loser_ids = [uid for uid in team2_ids if uid in matched_stats]
+        winner_label = team_label(1, match_data)
+    elif winner_team == 2:
+        winner_ids = [uid for uid in team2_ids if uid in matched_stats]
+        loser_ids = [uid for uid in team1_ids if uid in matched_stats]
+        winner_label = team_label(2, match_data)
+    elif winner_side == team1_side:
+        winner_ids = [uid for uid in team1_ids if uid in matched_stats]
+        loser_ids = [uid for uid in team2_ids if uid in matched_stats]
+        winner_label = team_label(1, match_data)
     elif winner_side == team2_side:
-        winner_ids   = [uid for uid in team2_ids if uid in matched_stats]
-        loser_ids    = [uid for uid in team1_ids if uid in matched_stats]
-        winner_label = "🔴 Команда 2 (Защита)"
+        winner_ids = [uid for uid in team2_ids if uid in matched_stats]
+        loser_ids = [uid for uid in team1_ids if uid in matched_stats]
+        winner_label = team_label(2, match_data)
     else:
-        winner_ids   = []
-        loser_ids    = list(matched_stats.keys())
+        winner_ids = []
+        loser_ids = list(matched_stats.keys())
         winner_label = f"Сторона: {winner_side}"
 
-    # Обновляем ELO
+    score_winner = parsed.get("score_winner")
+    score_loser = parsed.get("score_loser")
+    if score_winner is None or score_loser is None:
+        try:
+            score_atk_int = int(score_atk) if str(score_atk).isdigit() else None
+            score_def_int = int(score_def) if str(score_def).isdigit() else None
+        except (ValueError, TypeError):
+            score_atk_int = score_def_int = None
+        if winner_team == 1 or winner_side == team1_side:
+            score_winner = score_atk_int if team1_side == "attack" else score_def_int
+            score_loser = score_def_int if team1_side == "attack" else score_atk_int
+        elif winner_team == 2 or winner_side == team2_side:
+            score_winner = score_def_int if team2_side == "defense" else score_atk_int
+            score_loser = score_atk_int if team2_side == "defense" else score_def_int
+        else:
+            score_winner = score_loser = None
+
+    # Обновляем ELO с новой математикой
     elo_changes = {}
     if winner_ids or loser_ids:
         elo_changes = elo_engine.update_elos_after_match(
             winner_ids=winner_ids,
             loser_ids=loser_ids,
             stats_by_id=matched_stats,
+            score_winner=score_winner,
+            score_loser=score_loser,
         )
 
     # Обновляем linked из БД (там могли появиться новые авто-привязки)
@@ -633,32 +956,41 @@ async def _finalize_match(channel, parsed: dict, match_data: dict,
     linked_fresh = db_manager.get_players_bulk(all_ids)
 
     # ── Embed результатов ──────────────────────────────────────────────
-    embed = disnake.Embed(title="🏆 Матч завершён!", color=disnake.Color.gold())
-    embed.add_field(name="🥇 Победитель", value=winner_label, inline=True)
-    embed.add_field(name="📊 Счёт",       value=f"**{score_atk} : {score_def}**", inline=True)
-    embed.add_field(name="\u200b",         value="\u200b", inline=True)
+    embed = ui_theme.brand_embed(title="🏆  Матч завершён!", color=ui_theme.COLOR_SUCCESS)
+    if score_winner is not None and score_loser is not None:
+        score_display = f"# {score_winner} : {score_loser}"
+    else:
+        score_display = f"# {score_atk} : {score_def}"
+    embed.description = (
+        f"🥇  **{winner_label}**\n"
+        f"{score_display}\n"
+        f"{ui_theme.DIVIDER}"
+    )
 
-    # Таблица по игрокам со скриншота
+    # Таблица по игрокам — сортируем по ACS (как в игре)
+    sorted_players = sorted(players_raw, key=lambda p: p.get("acs", 0) or 0, reverse=True)
     perf_lines = []
-    for p in players_raw:
+    for p in sorted_players:
         riot_id = p.get("riot_id", "?")
         k  = p.get("kills",   0)
         d  = p.get("deaths",  0)
         a  = p.get("assists", 0)
         acs = p.get("acs",   0)
         hs  = p.get("hs_percent")
-        hs_str = f" HS:{hs}%" if hs is not None else ""
+        hs_str = f" · HS {hs}%" if hs is not None else ""
         team_icon = "🔵" if p.get("team") == "attack" else "🔴"
-        perf_lines.append(f"{team_icon} `{riot_id}` {k}/{d}/{a} ACS:{acs}{hs_str}")
+        perf_lines.append(
+            f"{team_icon} `{acs:>3}` ACS · {k}/{d}/{a}{hs_str} — **{riot_id}**"
+        )
 
     if perf_lines:
         embed.add_field(
-            name="📋 Статистика",
+            name="📋  Статистика (по ACS)",
             value="\n".join(perf_lines),
             inline=False,
         )
 
-    # ELO изменения
+    # ELO изменения (с отображением импакта)
     elo_lines = []
     for uid, ch in elo_changes.items():
         entry = linked_fresh.get(uid) or linked.get(uid) or {}
@@ -668,8 +1000,11 @@ async def _finalize_match(channel, parsed: dict, match_data: dict,
         label = elo_engine.custom_elo_to_rank_label(ch["new"])
         won   = uid in winner_ids
         result_icon = "✅" if won else "❌"
+        p_m   = ch.get("perf_mult", 1.0)
+        perf_emoji = "🔥" if p_m >= 1.2 else ("🥶" if p_m <= 0.8 else "🤝")
         elo_lines.append(
-            f"{result_icon} `{name}`: **{ch['old']}** → **{ch['new']}** ({sign}{delta}) {label}"
+            f"{result_icon} `{name}`: **{ch['old']}** → **{ch['new']}** "
+            f"({sign}{delta}) {label} [Импакт: {perf_emoji} {p_m}x]"
         )
 
     if elo_lines:
@@ -682,8 +1017,8 @@ async def _finalize_match(channel, parsed: dict, match_data: dict,
     unmatched_count = len(players_raw) - len(matched_stats)
     if unmatched_count > 0:
         embed.set_footer(
-            text=f"⚠️ {unmatched_count} игроков пропущено — их ELO не обновилось. "
-                 "Следующий раз попроси привязать /link заранее."
+            text=f"{ui_theme.BRAND_FOOTER}  ·  ⚠️ {unmatched_count} не распознано "
+                 "(попроси привязать /link заранее)"
         )
 
     # Записываем историю в БД

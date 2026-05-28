@@ -1,7 +1,28 @@
 import disnake
 import random
+import asyncio
+import logging
 from ui.dashboard_view import MatchDashboardView
-from utils import guild_setup
+from utils import guild_setup, db_manager, riot_api
+from utils import ui_theme
+
+log = logging.getLogger(__name__)
+
+
+async def _sync_lobby_ranks(players: list):
+    """Фоновая сверка актуальности рангов лобби (троттлинг внутри riot_api)."""
+    try:
+        ids = [m.id for m in players]
+        linked = db_manager.get_players_bulk(ids)
+        if not linked:
+            return
+
+        def _apply(uid, rd):
+            db_manager.update_rank(uid, rd["rank"], rd["weight"], rd["elo"])
+
+        await riot_api.refresh_ranks_bulk(linked, on_update=_apply)
+    except Exception as e:
+        log.warning(f"Сверка рангов лобби не удалась: {e}")
 
 class WaitingRoomView(disnake.ui.View):
     def __init__(self, host: disnake.Member, voice_channel: disnake.VoiceChannel, mode: str):
@@ -30,10 +51,18 @@ class WaitingRoomView(disnake.ui.View):
         players_list_obj = members_in_vc if len(members_in_vc) > 0 else [inter.author]
         players_desc = "\n".join([f"• {m.mention}" for m in players_list_obj])
 
-        embed = disnake.Embed(
-            title=f"⚔️ Матч | Режим: {self.mode}",
-            description=f"**Игроки ({len(players_list_obj)}):**\n{players_desc}\n\nНастройте матч и нажмите START:",
-            color=disnake.Color.blurple()
+        # Автоматически сверяем ранги в фоне, пока хост настраивает матч
+        asyncio.create_task(_sync_lobby_ranks(list(players_list_obj)))
+
+        embed = ui_theme.brand_embed(
+            title=f"⚔️  Настройка матча · {self.mode}",
+            description=(
+                f"**Игроки в лобби — {len(players_list_obj)}**\n"
+                f"{ui_theme.DIVIDER}\n"
+                f"{players_desc}\n\n"
+                f"➤ Жми **TEAM → MAP → AGENTS**, затем **START**."
+            ),
+            color=ui_theme.COLOR_PRIMARY,
         )
         
         # ПЕРЕДАЕМ self.voice_channel (чтобы потом его удалить)
@@ -64,14 +93,16 @@ class SetupModeView(disnake.ui.View):
             await inter.edit_original_response(content="❌ Нет прав создавать каналы!")
             return
 
-        embed = disnake.Embed(
-            title=f"⏳ Ожидание игроков | Режим: {mode_name}",
+        embed = ui_theme.brand_embed(
+            title=f"⏳  Сбор игроков · {mode_name}",
             description=(
                 f"**Организатор:** {inter.author.mention}\n"
-                f"**Голосовой канал:** {vc.mention}\n\n"
-                f"> Ждем игроков..."
+                f"**Голосовой канал:** {vc.mention}\n"
+                f"{ui_theme.DIVIDER}\n"
+                f"Заходите в голосовой канал. Когда все в сборе — "
+                f"организатор жмёт **«ВСЕ ГОТОВЫ»**."
             ),
-            color=disnake.Color.orange()
+            color=ui_theme.COLOR_WARN,
         )
 
         view = WaitingRoomView(host=inter.author, voice_channel=vc, mode=mode_name)

@@ -2,6 +2,12 @@ import random
 from itertools import combinations
 from .game_data import MAP_POOL, AGENT_POOL
 from . import db_manager
+from .elo_engine import RANK_TO_START_ELO
+
+# ELO для игрока без данных (считаем «средним», чтобы не валить всех в одну команду)
+DEFAULT_ELO = 1000
+# Сколько кастомок нужно, чтобы полностью доверять Custom ELO вместо ранга
+CALIBRATION_GAMES = 10
 
 
 def get_random_maps(count=3):
@@ -15,20 +21,55 @@ def assign_random_agents(players):
     return assignments
 
 
-def get_random_agent():
-    """Возвращает одного случайного агента"""
-    return random.choice(AGENT_POOL)
+def get_random_agent(exclude: str | None = None):
+    """Случайный агент; exclude — не повторять текущего при реролле."""
+    pool = [a for a in AGENT_POOL if a != exclude] if exclude else list(AGENT_POOL)
+    return random.choice(pool or AGENT_POOL)
 
 
 # ---------------------------------------------------------------------------
 # Балансировка команд по рангу
 # ---------------------------------------------------------------------------
 
-def _get_weight(player, db_data: dict) -> int:
-    """Получает числовой вес игрока из БД. Если не привязан — 0 (Unrated)."""
-    uid = player.id if hasattr(player, "id") else int(player)
-    entry = db_data.get(uid)
-    return entry["rank_weight"] if entry else 0
+def _player_id(player) -> int:
+    return player.id if hasattr(player, "id") else int(player)
+
+
+def _get_skill(player, db_data: dict) -> float | None:
+    """
+    Оценка силы игрока в ELO-шкале (~800–1300).
+
+    Логика:
+      • не привязан / нет данных          → None (исключаем из расчёта весов);
+      • привязан, но мало кастомок         → опираемся на стартовое ELO от ранга;
+      • есть Custom ELO                    → плавно смешиваем ранг и Custom ELO
+                                             (чем больше игр — тем больше веса у Custom).
+    """
+    entry = db_data.get(_player_id(player))
+    if not entry:
+        return None
+
+    rank_start = RANK_TO_START_ELO.get(entry.get("rank_weight", 0), DEFAULT_ELO)
+    custom = entry.get("custom_elo")
+    games = entry.get("custom_games", 0) or 0
+
+    if custom and games > 0:
+        confidence = min(games / CALIBRATION_GAMES, 1.0)
+        return round(rank_start * (1 - confidence) + custom * confidence)
+    return float(rank_start)
+
+
+def _get_weight(player, db_data: dict) -> float:
+    """Сила игрока для отображения/суммирования (None → среднее ELO)."""
+    skill = _get_skill(player, db_data)
+    return skill if skill is not None else DEFAULT_ELO
+
+
+def team_average_skill(team: list, db_data: dict) -> int:
+    """Средняя сила команды (ELO-шкала). 0 — если команда пуста."""
+    if not team:
+        return 0
+    return round(sum(_get_weight(p, db_data) for p in team) / len(team))
 
 
 def split_teams_balanced(players: list) -> tuple[list, list]:
@@ -45,38 +86,38 @@ def split_teams_balanced(players: list) -> tuple[list, list]:
     if n < 2:
         return players, []
 
-    half = n // 2
-    ids = [p.id if hasattr(p, "id") else int(p) for p in players]
+    team_small = n // 2
+    team_large = n - team_small
+    ids = [_player_id(p) for p in players]
     db_data = db_manager.get_players_bulk(ids)
 
-    # Если никто не привязан — обычный рандом
-    all_unrated = all(_get_weight(p, db_data) == 0 for p in players)
-    if all_unrated:
+    skills = [_get_skill(p, db_data) for p in players]
+
+    # Если вообще никто не привязан — обычный рандом
+    if all(s is None for s in skills):
         shuffled = players.copy()
         random.shuffle(shuffled)
-        return shuffled[:half], shuffled[half:]
+        return shuffled[:team_small], shuffled[team_small:]
 
-    weights = [_get_weight(p, db_data) for p in players]
-    total = sum(weights)
+    # Неизвестных считаем «средними», чтобы не сваливать их в одну команду
+    weights = [s if s is not None else DEFAULT_ELO for s in skills]
 
     best_combo = None
     best_diff = float("inf")
 
     if n <= 12:
-        # Полный перебор
-        for combo in combinations(range(n), half):
+        for combo in combinations(range(n), team_small):
             s1 = sum(weights[i] for i in combo)
-            diff = abs(total - 2 * s1)
+            diff = abs(sum(weights) - 2 * s1)
             if diff < best_diff:
                 best_diff = diff
                 best_combo = combo
     else:
-        # Жадный: сортируем по убыванию, раскидываем поочерёдно
         sorted_idx = sorted(range(n), key=lambda i: weights[i], reverse=True)
         t1_sum, t2_sum = 0, 0
         t1_idx, t2_idx = [], []
         for idx in sorted_idx:
-            if len(t1_idx) < half and (len(t2_idx) >= half or t1_sum <= t2_sum):
+            if len(t1_idx) < team_small and (len(t2_idx) >= team_large or t1_sum <= t2_sum):
                 t1_idx.append(idx)
                 t1_sum += weights[idx]
             else:
@@ -114,10 +155,14 @@ def format_teams_embed_fields(team1: list, team2: list, db_data: dict = None) ->
     t1_str = "\n".join(fmt_player(p) for p in team1)
     t2_str = "\n".join(fmt_player(p) for p in team2)
 
-    t1_total = sum(_get_weight(p, db_data) for p in team1)
-    t2_total = sum(_get_weight(p, db_data) for p in team2)
+    def _avg(team):
+        if not team:
+            return 0
+        return round(sum(_get_weight(p, db_data) for p in team) / len(team))
 
-    t1_str += f"\n\n*Суммарный рейтинг: {t1_total}*"
-    t2_str += f"\n\n*Суммарный рейтинг: {t2_total}*"
+    t1_avg, t2_avg = _avg(team1), _avg(team2)
+
+    t1_str += f"\n\n*Средняя сила: {t1_avg}*"
+    t2_str += f"\n\n*Средняя сила: {t2_avg}*"
 
     return t1_str, t2_str

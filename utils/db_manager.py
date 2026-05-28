@@ -162,10 +162,7 @@ def _append_match(data, discord_id, result, stats_by_id, elo_changes, map_name, 
     if len(p["match_history"]) > 100:
         p["match_history"] = p["match_history"][-100:]
 
-    if result == "win":
-        p["wins"] = p.get("wins", 0) + 1
-    else:
-        p["losses"] = p.get("losses", 0) + 1
+    # wins/losses обновляет elo_engine.update_elos_after_match — не дублируем здесь
 
 
 # ── Статистика ───────────────────────────────────────────────────────

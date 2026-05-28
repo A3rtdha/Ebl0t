@@ -1,7 +1,7 @@
 import disnake
 import re
 from utils import valo_logic, match_manager, db_manager
-from utils import guild_setup, ui_theme
+from utils import custom_invite, guild_setup, ui_theme
 from utils.riot_api import rank_emoji
 
 # --- ВЫБОР КАРТЫ ---
@@ -242,4 +242,5 @@ class MatchDashboardView(disnake.ui.View):
         for child in self.children: child.disabled = True
         
         await inter.edit_original_response(embed=embed, view=self)
+        await custom_invite.close_for_host(guild, self.host, customs_channel=inter.channel)
         await inter.channel.send(f"{self.host.mention} — **GL & HF!** 🔥")

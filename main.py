@@ -1,11 +1,73 @@
+import atexit
 import os
 import disnake
 import logging
+import subprocess
 import traceback
+from pathlib import Path
 from disnake.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
+
+ROOT = Path(__file__).resolve().parent
+PID_FILE = ROOT / ".eblot.pid"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _stop_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid)],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        import signal
+        os.kill(pid, signal.SIGTERM)
+
+
+def _ensure_single_instance() -> None:
+    if not PID_FILE.exists():
+        return
+    try:
+        old_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        PID_FILE.unlink(missing_ok=True)
+        return
+    if old_pid != os.getpid() and _pid_alive(old_pid):
+        logger.warning("Останавливаю предыдущий инстанс Eblot (PID %s)...", old_pid)
+        _stop_pid(old_pid)
+    PID_FILE.unlink(missing_ok=True)
+
+
+def _write_pid_file() -> None:
+    PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+    def _cleanup() -> None:
+        try:
+            if PID_FILE.exists() and int(PID_FILE.read_text(encoding="utf-8")) == os.getpid():
+                PID_FILE.unlink()
+        except (ValueError, OSError):
+            pass
+
+    atexit.register(_cleanup)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -98,6 +160,8 @@ if __name__ == '__main__':
         logger.critical("DISCORD_TOKEN не задан в .env!")
         exit(1)
 
+    _ensure_single_instance()
+    _write_pid_file()
     load_cogs()
     try:
         bot.run(TOKEN)

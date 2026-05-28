@@ -716,27 +716,81 @@ def _detect_scoreboard_rows(img, cols: Optional[Dict] = None) -> Tuple[List[floa
     return centers, row_half
 
 
-def _row_red_green_delta(img, y1p: float, y2p: float) -> float:
+def _row_team_side(img, y1p: float, y2p: float) -> str:
+    """
+    Сторона строки с точки зрения хоста (он всегда кидает скрин):
+      зелёный / бирюзовый — тиммейты, жёлтый — хост, красный — враги.
+    Возвращает 'ally' или 'enemy'.
+    """
     patch = _crop_pct(img, TEAM_COLOR_X1, y1p, TEAM_COLOR_X2, y2p)
     if patch.size == 0:
-        return 0.0
+        return "ally"
     b, g, r = (float(x) for x in patch.mean(axis=(0, 1)))
-    return r - g
+
+    # Враги: выраженный красный фон
+    if r > 65 and r > g * 1.22 and r > b * 1.12:
+        return "enemy"
+    # Союзники: зелёный / бирюзовый
+    if g > 50 and g >= r * 0.82 and g > b * 0.9:
+        return "ally"
+    # Хост: жёлтая строка (R≈G, оба высокие)
+    if r > 50 and g > 50 and abs(r - g) < 50 and b < min(r, g) * 0.92:
+        return "ally"
+    # Fallback: старый R−G порог
+    return "enemy" if (r - g) > 12 else "ally"
 
 
 def _teams_from_row_colors(img, row_y_pairs: List[Tuple[float, float]]) -> List[str]:
     """
-    Scoreboard отсортирован по ACS — команда по цвету строки.
-    Два кластера R−G: более «красный» → attack, более «бирюзовый» → defense.
+    Scoreboard часто отсортирован по ACS, не по команде — делим по цвету строки.
+    Союзники хоста (зелёный/жёлтый) → attack, враги (красный) → defense.
     """
     if not row_y_pairs:
         return []
-    deltas = [_row_red_green_delta(img, y1, y2) for y1, y2 in row_y_pairs]
-    if len(deltas) == 1:
-        return ["attack" if deltas[0] >= 0 else "defense"]
-    sorted_d = sorted(deltas)
-    mid = sorted_d[len(sorted_d) // 2]
-    return ["attack" if d >= mid else "defense" for d in deltas]
+    return [
+        "attack" if _row_team_side(img, y1, y2) == "ally" else "defense"
+        for y1, y2 in row_y_pairs
+    ]
+
+
+def infer_ally_won_from_scores(score_ally: int | None, score_enemy: int | None) -> bool | None:
+    """Счёт слева = союзники хоста. 13 раундов — стандартная победа; иначе большее число."""
+    if score_ally is None or score_enemy is None:
+        return None
+    try:
+        a, b = int(score_ally), int(score_enemy)
+    except (TypeError, ValueError):
+        return None
+    if a == 13 and b < 13:
+        return True
+    if b == 13 and a < 13:
+        return False
+    if a != b:
+        return a > b
+    return None
+
+
+def finalize_host_perspective(parsed: dict) -> dict:
+    """
+    Нормализует итог после OCR/Gemini: attack = союзники хоста, defense = враги;
+    winner и host_won из VICTORY/DEFEAT и счёта.
+    """
+    parsed = dict(parsed)
+    s_ally = parsed.get("score_attack")
+    s_enemy = parsed.get("score_defense")
+    host_won = parsed.get("host_won")
+    ally_won_score = infer_ally_won_from_scores(s_ally, s_enemy)
+
+    if host_won is True:
+        parsed["winner"] = "attack"
+    elif host_won is False:
+        parsed["winner"] = "defense"
+    elif ally_won_score is not None:
+        parsed["winner"] = "attack" if ally_won_score else "defense"
+        if host_won is None:
+            parsed["host_won"] = ally_won_score
+
+    return parsed
 
 
 def _ocr_acs(img, y1p: float, y2p: float, cols: Optional[Dict] = None) -> int:
@@ -788,10 +842,30 @@ def _parse_row_kda(img, y1p: float, y2p: float, cols: Optional[Dict] = None) -> 
 
 
 # ═══════════════════════════════════════════════════════════
-# ГЛАВНАЯ ФУНКЦИЯ
+# ГЛАВНАЯ ФУНКЦИЯ — диспетчер: Gemini Vision → Tesseract fallback
 # ═══════════════════════════════════════════════════════════
 
 async def parse_screenshot(image_bytes: bytes, content_type: str = "image/png") -> Optional[Dict]:
+    """
+    Основной распознаватель.
+    1) Если задан GEMINI_API_KEY — пробуем Gemini Vision (точность ~как у человека).
+    2) Иначе / при ошибке — локальный Tesseract-парсер (_parse_screenshot_tesseract).
+    """
+    try:
+        from . import gemini_vision
+        if gemini_vision.is_enabled():
+            result = await gemini_vision.parse_scoreboard(image_bytes, content_type)
+            if result and result.get("players"):
+                log.info("Скриншот распознан через Gemini Vision")
+                return finalize_host_perspective(result)
+            log.warning("Gemini Vision не дал результата — fallback на Tesseract")
+    except Exception as e:
+        log.warning(f"Gemini Vision недоступен ({e}) — fallback на Tesseract")
+
+    return await _parse_screenshot_tesseract(image_bytes, content_type)
+
+
+async def _parse_screenshot_tesseract(image_bytes: bytes, content_type: str = "image/png") -> Optional[Dict]:
     try:
         import cv2
     except ImportError:
@@ -921,14 +995,15 @@ async def parse_screenshot(image_bytes: bytes, content_type: str = "image/png") 
         elif len(nums) == 1:
             s1 = nums[0]
 
-    winner_fallback = "attack" if (s1 or 0) > (s2 or 0) else "defense"
-    return {
+    result = {
         "host_won":      host_won,
-        "winner":        winner_fallback,
+        "winner":        "attack",
         "score_attack":  s1 or 0,
         "score_defense": s2 or 0,
+        "teams_relative_to_host": True,
         "players":       players,
     }
+    return finalize_host_perspective(result)
 
 
 # ═══════════════════════════════════════════════════════════

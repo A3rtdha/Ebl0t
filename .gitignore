@@ -39,6 +39,7 @@ Thumbs.db
 Desktop.ini
 
 # ─── Logs & temp ────────────────────────────────────────────────
+.eblot.pid
 *.log
 *.tmp
 *.temp

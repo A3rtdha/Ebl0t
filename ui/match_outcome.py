@@ -193,6 +193,8 @@ async def prompt_match_outcome(channel, host, guild, parsed: dict, match_data: d
             f"счёт {guess_score[0]}:{guess_score[1]} — проверь и подтверди._"
         )
     from utils import ui_theme
+    from utils import result_flow_cleanup
+
     embed = ui_theme.brand_embed(
         title="🏁  Итог матча",
         description=(
@@ -203,7 +205,8 @@ async def prompt_match_outcome(channel, host, guild, parsed: dict, match_data: d
         ),
         color=ui_theme.COLOR_WARN,
     )
-    await channel.send(
+    msg = await channel.send(
         embed=embed,
         view=MatchOutcomeView(host, channel, guild, parsed, match_data, bot),
     )
+    result_flow_cleanup.track(channel.id, msg)

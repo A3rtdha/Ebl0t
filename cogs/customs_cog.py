@@ -1,7 +1,7 @@
 import disnake
 from disnake.ext import commands
 from ui.lobby_views import SetupModeView
-from utils import guild_setup, network_retry
+from utils import guild_setup, network_retry, custom_invite
 
 class Customs(commands.Cog):
     def __init__(self, bot):
@@ -21,7 +21,8 @@ class Customs(commands.Cog):
             f"🚀 **{inter.author.display_name}** собирает кастомку!\n"
             f"Переходите в {inter.channel.mention}, чтобы нажать кнопку участия.{ping_line}"
         )
-        await invite_channel.send(invite_text)
+        invite_msg = await invite_channel.send(invite_text)
+        custom_invite.register(inter.author.id, invite_channel.id, invite_msg.id)
 
         embed = disnake.Embed(
             title="🎮 Настройка Valorant Custom",

@@ -22,5 +22,21 @@ if ($proxyLine -match 'PROXY\s*=\s*(.+)$') {
     }
 }
 
+# Один инстанс: несколько python main.py → тройные ответы на один скрин
+$pidFile = Join-Path $PSScriptRoot ".eblot.pid"
+if (Test-Path $pidFile) {
+    $oldPid = [int](Get-Content $pidFile -Raw)
+    if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+        Write-Host "Останавливаю предыдущий инстанс Eblot (PID $oldPid)..." -ForegroundColor Yellow
+        Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+}
+# Подчистить зомби без pid-файла (старые запуски)
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'main\.py' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
+
 Write-Host "Запуск бота..." -ForegroundColor Cyan
 python main.py

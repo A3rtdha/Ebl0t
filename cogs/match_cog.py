@@ -20,6 +20,7 @@ from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot
 from ui.modals import ManualScoreboardModal
 from ui.match_outcome import prompt_match_outcome, team_label
 from utils.manual_scoreboard import parsed_to_manual_text, MANUAL_FORMAT_HELP
+from utils import result_flow_cleanup
 import asyncio
 import logging
 import uuid
@@ -89,6 +90,11 @@ class MatchCog(commands.Cog):
             host=inter.author, channel=inter.channel, match_data=match_data, bot=self.bot,
         )
         await inter.response.send_message(embed=embed, view=view)
+        try:
+            finish_msg = await inter.original_response()
+            result_flow_cleanup.track(inter.channel.id, finish_msg)
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -279,6 +285,7 @@ class ScreenshotListener(commands.Cog):
         self.pending: dict[int, dict] = {}
         self._ocr_generation: dict[int, int] = {}
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._handled_message_ids: set[int] = set()
 
     def ocr_session(self, channel_id: int) -> int:
         return self._ocr_generation.get(channel_id, 0)
@@ -301,13 +308,15 @@ class ScreenshotListener(commands.Cog):
     async def on_message(self, message: disnake.Message):
         if message.author.bot:
             return
+        if message.id in self._handled_message_ids:
+            return
 
         ch_id = message.channel.id
         lock = self._locks[ch_id]
-        if lock.locked():
-            return
 
         async with lock:
+            if message.id in self._handled_message_ids:
+                return
             pending = self.pending.get(ch_id)
             if not pending or message.author.id != pending["host_id"]:
                 return
@@ -319,6 +328,11 @@ class ScreenshotListener(commands.Cog):
             if image_att is None:
                 return
 
+            self._handled_message_ids.add(message.id)
+            result_flow_cleanup.track(ch_id, message)
+            if len(self._handled_message_ids) > 500:
+                self._handled_message_ids.clear()
+
             pending_data = self.pending.pop(ch_id, None)
             if not pending_data:
                 return
@@ -327,6 +341,7 @@ class ScreenshotListener(commands.Cog):
             status = await message.channel.send(
                 "🔍 Анализирую скриншот... подожди несколько секунд."
             )
+            result_flow_cleanup.track(ch_id, status)
 
             try:
                 image_bytes  = await image_att.read()
@@ -379,7 +394,7 @@ class ScreenshotListener(commands.Cog):
                     inline=False,
                 )
 
-                await message.channel.send(
+                preview_msg = await message.channel.send(
                     embed=preview,
                     view=OcrReviewView(
                         host=message.author,
@@ -391,6 +406,7 @@ class ScreenshotListener(commands.Cog):
                         ocr_session=ocr_session,
                     ),
                 )
+                result_flow_cleanup.track(ch_id, preview_msg)
 
             except Exception as e:
                 log.exception("Ошибка при обработке скриншота")
@@ -440,7 +456,42 @@ async def _start_result_flow(channel, host, guild, parsed: dict, match_data: dic
             raise
 
 
+def _normalize_host_relative_teams(parsed: dict, host, match_data: dict) -> dict:
+    """
+    OCR/Gemini видят scoreboard с точки зрения хоста:
+    attack = союзники хоста, defense = враги. Для ELO переводим это в реальные
+    стороны матча, сохранённые при старте кастомки.
+    """
+    if not parsed.get("teams_relative_to_host"):
+        return parsed
+
+    host_id = getattr(host, "id", None)
+    team1_ids = set(match_data.get("team1_ids", []))
+    team2_ids = set(match_data.get("team2_ids", []))
+    team1_side = match_data.get("team1_side", "attack")
+    team2_side = "defense" if team1_side == "attack" else "attack"
+
+    if host_id in team1_ids:
+        ally_side, enemy_side = team1_side, team2_side
+    elif host_id in team2_ids:
+        ally_side, enemy_side = team2_side, team1_side
+    else:
+        return parsed
+
+    side_map = {"attack": ally_side, "defense": enemy_side}
+    normalized = dict(parsed)
+    normalized["players"] = [
+        {**p, "team": side_map.get(p.get("team"), p.get("team"))}
+        for p in parsed.get("players", [])
+    ]
+    if parsed.get("winner") in side_map:
+        normalized["winner"] = side_map[parsed["winner"]]
+    normalized["teams_relative_to_host"] = False
+    return normalized
+
+
 async def _start_result_flow_locked(channel, host, guild, parsed: dict, match_data: dict, bot=None):
+    parsed = _normalize_host_relative_teams(parsed, host, match_data)
     players_raw: list[dict] = parsed.get("players", [])
     team1_ids   = match_data.get("team1_ids", [])
     team2_ids   = match_data.get("team2_ids", [])
@@ -572,7 +623,8 @@ async def _matching_wizard(
             on_pick=lambda riot_id, stats: on_picked(discord_id, riot_id, stats, idx),
             on_skip=lambda: on_skipped(idx),
         )
-        await channel.send(embed=embed, view=view)
+        msg = await channel.send(embed=embed, view=view)
+        result_flow_cleanup.track(channel.id, msg)
 
     async def on_picked(discord_id: int, riot_id: str, stats: dict, idx: int):
         if not _alive():
@@ -792,10 +844,12 @@ class PickNickView(disnake.ui.View):
         self.wizard_session = wizard_session
         self.channel_id = channel_id
         self._responded = False
+        self._add_nick_select(available_nicks)
 
     def _stale(self) -> bool:
         return _wizard_sessions.get(self.channel_id) != self.wizard_session
 
+    def _add_nick_select(self, available_nicks: list) -> None:
         options = []
         for i, n in enumerate(available_nicks[:25]):
             riot_id = (n.get("riot_id") or "").strip() or "?"
@@ -1031,6 +1085,7 @@ async def _finalize_match_body(channel, parsed: dict, match_data: dict,
         map_name=map_name,
     )
 
+    await result_flow_cleanup.cleanup_channel(channel)
     await channel.send(embed=embed)
 
 

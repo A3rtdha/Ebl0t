@@ -4,10 +4,17 @@
 .env.*
 !.env.example
 
-# База: Discord ID ↔ Riot ID, ELO, история матчей
-data/data.json
-data/active_matches.json
+# Proxy / VPN (VLESS UUID, sing-box конфиги)
+proxy/
+
+# Runtime data (кроме статического game_data.json)
+data/*.json
+!data/game_data.json
 data.json
+
+# Локальные скриншоты для OCR-тестов (содержат ники игроков)
+*.png
+!docs/**/*.png
 
 # ─── Python ──────────────────────────────────────────────────────
 __pycache__/

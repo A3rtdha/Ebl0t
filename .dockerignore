@@ -3,3 +3,13 @@ __pycache__
 .git
 .venv
 venv
+.env
+.env.*
+!.env.example
+proxy/
+data/*.json
+!data/game_data.json
+*.png
+.eblot.pid
+*.log
+.cache/

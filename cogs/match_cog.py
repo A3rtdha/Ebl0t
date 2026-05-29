@@ -16,7 +16,7 @@ match_cog.py — завершение матча и обработка резу�
 
 import disnake
 from disnake.ext import commands
-from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot_api, guild_setup, ui_theme
+from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot_api, ui_theme, aftermatch_voices
 from ui.modals import ManualScoreboardModal
 from ui.match_outcome import prompt_match_outcome, team_label
 from utils.manual_scoreboard import parsed_to_manual_text, MANUAL_FORMAT_HELP
@@ -103,9 +103,9 @@ class MatchCog(commands.Cog):
 
 async def _regroup_voice_channels(guild: disnake.Guild, match_data: dict):
     """
-    После /finish переносим всех из командных каналов в один канал
-    «перегруппировки», затем удаляем опустевшие командные каналы.
-    Так лобби не разваливается — все остаются вместе.
+    После /finish переносим всех из командных каналов в aftermatch-пул
+    (2 постоянных канала или временный, если оба заняты недавними игроками),
+    затем удаляем опустевшие командные каналы.
     """
     vc_ids = [match_data.get("team1_vc"), match_data.get("team2_vc")]
     team_vcs = []
@@ -123,20 +123,10 @@ async def _regroup_voice_channels(guild: disnake.Guild, match_data: dict):
     regroup = None
     if members:
         try:
-            category, _, _ = await guild_setup.get_or_create_hub(guild)
-            lobby_id = match_data.get("lobby_id", "")
-            regroup = await guild.create_voice_channel(
-                name=f"🔁 Лобби #{lobby_id}", category=category,
-            )
-            for m in members:
-                try:
-                    await m.move_to(regroup)
-                except Exception:
-                    pass
+            regroup = await aftermatch_voices.move_players_after_finish(guild, match_data, members)
         except Exception as e:
-            log.warning(f"Не удалось создать регруп-канал: {e}")
+            log.warning(f"Не удалось перенести игроков в aftermatch: {e}")
 
-    # Удаляем теперь уже пустые командные каналы
     for ch in team_vcs:
         try:
             await ch.delete()
@@ -490,8 +480,45 @@ def _normalize_host_relative_teams(parsed: dict, host, match_data: dict) -> dict
     return normalized
 
 
+def _infer_winner_team(parsed: dict, host, match_data: dict) -> int | None:
+    """Автоматически переводит host_won/score в team1/team2."""
+    winner_team = parsed.get("winner_team")
+    if winner_team in (1, 2):
+        return winner_team
+
+    host_won = parsed.get("host_won")
+    host_id = getattr(host, "id", None)
+    if host_won is not None and host_id is not None:
+        if host_id in set(match_data.get("team1_ids", [])):
+            return 1 if host_won else 2
+        if host_id in set(match_data.get("team2_ids", [])):
+            return 2 if host_won else 1
+
+    sa, sd = parsed.get("score_attack"), parsed.get("score_defense")
+    try:
+        sa, sd = int(sa), int(sd)
+    except (TypeError, ValueError):
+        return None
+    if sa == 13 and sd < 13:
+        winner_side = "attack"
+    elif sd == 13 and sa < 13:
+        winner_side = "defense"
+    elif sa != sd:
+        winner_side = "attack" if sa > sd else "defense"
+    else:
+        return None
+
+    team1_side = match_data.get("team1_side", "attack")
+    if winner_side == team1_side:
+        return 1
+    return 2
+
+
 async def _start_result_flow_locked(channel, host, guild, parsed: dict, match_data: dict, bot=None):
     parsed = _normalize_host_relative_teams(parsed, host, match_data)
+    inferred_team = _infer_winner_team(parsed, host, match_data)
+    if inferred_team in (1, 2):
+        parsed["winner_team"] = inferred_team
     players_raw: list[dict] = parsed.get("players", [])
     team1_ids   = match_data.get("team1_ids", [])
     team2_ids   = match_data.get("team2_ids", [])

@@ -47,10 +47,33 @@ def apply_team_outcome(
 
 
 def guess_winner_team_from_parsed(parsed: dict, match_data: dict) -> int | None:
-    """Пытается угадать команду-победителя из OCR (сторона атака/защита)."""
+    """Пытается угадать команду-победителя из OCR, победы хоста и счёта."""
+    if parsed.get("winner_team") in (1, 2):
+        return parsed["winner_team"]
+
+    host_won = parsed.get("host_won")
+    if host_won is not None:
+        host_id = parsed.get("host_id")
+        host_team = parsed.get("host_team")
+        if host_team in (1, 2):
+            return host_team if host_won else (2 if host_team == 1 else 1)
+
     winner_side = parsed.get("winner")
     if winner_side not in ("attack", "defense"):
-        return parsed.get("winner_team")
+        sa, sd = parsed.get("score_attack"), parsed.get("score_defense")
+        try:
+            sa, sd = int(sa), int(sd)
+        except (TypeError, ValueError):
+            return None
+        if sa == 13 and sd < 13:
+            winner_side = "attack"
+        elif sd == 13 and sa < 13:
+            winner_side = "defense"
+        elif sa != sd:
+            winner_side = "attack" if sa > sd else "defense"
+        else:
+            return None
+
     team1_side = match_data.get("team1_side", "attack")
     if winner_side == team1_side:
         return 1
@@ -67,7 +90,11 @@ def guess_score_from_parsed(parsed: dict) -> tuple[int, int] | None:
     except (TypeError, ValueError):
         return None
     winner_side = parsed.get("winner")
-    team1_side = "attack"  # only need relative winner/loser rounds
+    host_won = parsed.get("host_won")
+    if host_won is True:
+        return (sa, sd)
+    if host_won is False:
+        return (sd, sa)
     if winner_side == "attack":
         return (sa, sd) if sa >= sd else (sd, sa)
     if winner_side == "defense":

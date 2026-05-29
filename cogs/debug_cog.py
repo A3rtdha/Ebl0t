@@ -15,7 +15,7 @@ class Debug(commands.Cog):
         h, m, s = up // 3600, (up % 3600) // 60, up % 60
 
         deps = {}
-        for pkg in ["aiohttp", "easyocr", "cv2", "numpy"]:
+        for pkg in ["aiohttp", "cv2", "numpy", "pytesseract"]:
             try:
                 __import__(pkg)
                 deps[pkg] = "✅"

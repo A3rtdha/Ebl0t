@@ -1,49 +1,93 @@
-# 🤖 Valorant Custom Bot
+# Valorant Custom Bot (Eblot)
 
-Многофункциональный Discord-бот для автоматизации создания кастомных матчей в Valorant. 
-Бот берет на себя всю рутину: создает голосовые каналы, делит игроков на команды, рандомит карты и агентов.
+Discord-бот для автоматизации кастомных матчей в Valorant: лобби, голосовые каналы, дашборд, распознавание скриншотов и Custom ELO.
 
-## 🌟 Текущий статус (MVP)
-Проект находится в стадии активной разработки. Реализован базовый цикл **Random Mode**:
-1.  Создание лобби через `/custom`.
-2.  Автоматическое создание голосового канала.
-3.  Сбор игроков и кнопка старта.
-4.  Интерактивный дашборд:
-    *   **TEAM:** Случайное распределение команд.
-    *   **MAP:** Выбор одной из 3-х случайных карт.
-    *   **AGENTS:** Раздача агентов + система **Reroll** (смена агента).
+## Возможности
 
-## 🛠 Технологии
-- **Язык:** Python 3.10+
-- **Библиотека:** `disnake` (форк discord.py)
-- **Инфраструктура:** Поддержка работы через HTTP-прокси (для обхода блокировок Discord).
+### Лобби и матч
+- `/custom` — создание кастомки (режим **RANDOM**; **VOTED** в планах)
+- Голосовой канал ожидания, кнопка «ВСЕ ГОТОВЫ» (только хост)
+- Dashboard: **TEAM**, **MAP**, **AGENTS**, персональный **REROLL**
+- Авто-создание каналов Attack / Defense и перемещение игроков
+- `/finish` — завершение матча, OCR scoreboard (Gemini Vision + Tesseract fallback), wizard исхода
+- Aftermatch: сбор игроков в общий голосовой канал после `/finish`
 
-## 🚀 Установка и запуск
+### Профиль и статистика
+- `/link` — привязка Riot ID
+- `/profile`, `/stats`, `/history` — карточка и статистика по кастомкам
+- `/leaderboard` — топ по Custom ELO
+- `/rank_refresh` — обновление ranked-ранга из Riot API
+- `/unlink` — отвязка аккаунта
 
-1.  **Клонирование и зависимости:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Утилиты
+- `/move` — перенос всех участников из одного голосового канала в другой
+- `/clean` — удаление последних сообщений в чате (нужны права модератора)
+- `/ping` — проверка связи и зависимостей
 
-2.  **Настройка окружения:**
-    Создайте файл `.env` и добавьте токен бота:
-    ```env
-    DISCORD_TOKEN=ваш_токен_здесь
-    ```
+## Технологии
 
-3.  **Настройка сети (для РФ):**
-    В `main.py` настроен прокси. Убедитесь, что у вас запущен VPN/Proxy клиент (например, Clash Verge) на порту `7897` (или измените порт в коде).
+- Python 3.10+
+- [disnake](https://github.com/DisnakeDev/disnake) (форк discord.py)
+- JSON-хранилище (`data/data.json`), Henrik Dev API, Gemini Vision / Tesseract OCR
+- HTTP-прокси через `.env` (Discord и Gemini)
 
-4.  **Запуск:**
-    ```bash
-    python main.py
-    ```
+## Установка и запуск
 
-## 📂 Структура проекта
-*   `cogs/` — Модули команд (customs_cog).
-*   `ui/` — Интерфейсы (Кнопки, Эмбеды, View).
-*   `utils/` — Логика игры (рандомайзеры, списки карт).
-*   `data/` — JSON базы данных (в планах).
+1. **Зависимости:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Окружение:** скопируй [`.env.example`](.env.example) → `.env` и заполни:
+   | Переменная | Назначение |
+   |------------|------------|
+   | `DISCORD_TOKEN` | Токен бота (обязательно) |
+   | `HENRIK_API_KEY` | Riot ranked через Henrik Dev API |
+   | `GEMINI_API_KEY` | OCR scoreboard через Gemini Vision |
+   | `GEMINI_MODEL` | Модель Gemini (по умолчанию `gemini-2.5-flash`) |
+   | `PROXY` | Прокси для Discord (http/https/socks5) |
+   | `GEMINI_PROXY` | Отдельный прокси для Gemini (если не задан — берётся `PROXY`) |
+   | `TESSERACT_CMD` | Путь к `tesseract.exe` на Windows |
+
+3. **Запуск:**
+   ```bash
+   python main.py
+   ```
+   На Windows можно использовать [`start.ps1`](start.ps1) — проверка прокси и защита от двойного запуска.
+
+4. **Docker (опционально):**
+   ```bash
+   docker build -t eblot .
+   docker run --env-file .env eblot
+   ```
+
+## Структура проекта
+
+```
+cogs/     — slash-команды (custom, match, profile, admin, debug)
+ui/       — views, modals, dashboard
+utils/    — OCR, ELO, БД, Riot API, aftermatch voices
+data/     — game_data.json (статика); runtime JSON — в .gitignore
+scripts/  — локальные тесты OCR и ручной apply матча
+proxy/    — локальные sing-box конфиги (в .gitignore)
+```
+
+Runtime-данные (`data/data.json`, `data/active_matches.json`) создаются ботом автоматически и не коммитятся.
+
+## Dev-утилиты
+
+```bash
+# Тест парсера скриншота (нужен локальный PNG)
+python scripts/test_screenshot_parse.py path/to/scoreboard.png
+
+# Ручной apply матча из распознанного scoreboard
+python scripts/apply_match_from_screen.py
+```
+
+## Документация
+
+- [ROADMAP.md](ROADMAP.md) — план разработки
+- [VALORANT_CUSTOMS_LOGIC.md](VALORANT_CUSTOMS_LOGIC.md) — логика лобби и матча
 
 ---
 *Developed by [Aertdha]*

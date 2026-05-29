@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 from disnake.ext import commands
 from dotenv import load_dotenv
+from utils import aftermatch_voices
 
 load_dotenv()
 
@@ -101,6 +102,19 @@ async def on_ready():
     logger.info(f'✅ Бот {bot.user} запущен! Серверов: {len(bot.guilds)}')
     if PROXY:
         logger.info(f'🔀 Прокси: {PROXY}')
+    for guild in bot.guilds:
+        try:
+            await aftermatch_voices.ensure_channels(guild)
+        except Exception as e:
+            logger.warning('Aftermatch-каналы на %s: %s', guild.name, e)
+
+
+@bot.event
+async def on_guild_join(guild: disnake.Guild):
+    try:
+        await aftermatch_voices.ensure_channels(guild)
+    except Exception as e:
+        logger.warning('Aftermatch-каналы на новом сервере %s: %s', guild.name, e)
 
 
 def _is_network_error(exc: BaseException) -> bool:

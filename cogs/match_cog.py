@@ -1085,12 +1085,12 @@ async def _finalize_match_body(channel, parsed: dict, match_data: dict,
         perf_emoji = "🔥" if p_m >= 1.2 else ("🥶" if p_m <= 0.8 else "🤝")
         elo_lines.append(
             f"{result_icon} `{name}`: **{ch['old']}** → **{ch['new']}** "
-            f"({sign}{delta}) {label} [Импакт: {perf_emoji} {p_m}x]"
+            f"({sign}{delta}) · {label} [Импакт: {perf_emoji} {p_m}x]"
         )
 
     if elo_lines:
         embed.add_field(
-            name="📈 Custom ELO",
+            name="📈 Звание Eblot",
             value="\n".join(elo_lines),
             inline=False,
         )

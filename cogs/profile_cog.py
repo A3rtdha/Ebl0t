@@ -144,14 +144,14 @@ class Profile(commands.Cog):
         )
 
         if custom_elo:
-            label = elo_engine.custom_elo_to_rank_label(custom_elo)
+            rank = elo_engine.custom_elo_to_rank(custom_elo)
             embed.add_field(
-                name="Custom ELO",
-                value=f"{label} **{custom_elo}** ({custom_games} игр)",
+                name="Звание Eblot",
+                value=f"**{rank['name']}** {rank['emoji']} · **{custom_elo}** ELO\n*{custom_games} кастомок*",
                 inline=True,
             )
         else:
-            embed.add_field(name="Custom ELO", value="Нет данных", inline=True)
+            embed.add_field(name="Звание Eblot", value="Калибровка — сыграй кастомку", inline=True)
 
         # Последние 20 матчей
         if stats.get("games", 0) > 0:
@@ -210,7 +210,11 @@ class Profile(commands.Cog):
         embed.set_thumbnail(url=target.display_avatar.url)
         embed.add_field(name="Riot ID",      value=f"`{data['riot_name']}#{data['riot_tag']}`", inline=True)
         embed.add_field(name="Ranked",       value=riot_rank,  inline=True)
-        embed.add_field(name="Custom ELO",   value=f"**{custom_elo}** {elo_label}" if custom_elo else "—", inline=True)
+        embed.add_field(
+            name="Eblot",
+            value=f"**{custom_elo}** · {elo_label}" if custom_elo else "—",
+            inline=True,
+        )
 
         embed.add_field(
             name=f"Результаты (последние {s['games']} матчей)",
@@ -318,7 +322,7 @@ class Profile(commands.Cog):
     # ──────────────────────────────────────────────────────────────────
     # /leaderboard
     # ──────────────────────────────────────────────────────────────────
-    @commands.slash_command(name="leaderboard", description="Топ игроков по Custom ELO")
+    @commands.slash_command(name="leaderboard", description="Топ игроков по званию Eblot")
     async def leaderboard(self, inter: disnake.ApplicationCommandInteraction):
         await inter.response.defer()
         all_players = db_manager.get_all_players()
@@ -340,18 +344,18 @@ class Profile(commands.Cog):
         for i, (uid, d) in enumerate(ranked):
             medal  = medals[i] if i < 3 else f"`#{i+1}`"
             elo    = d["custom_elo"]
-            label  = elo_engine.custom_elo_to_rank_label(elo)
+            rank   = elo_engine.custom_elo_to_rank(elo)
             wins   = d.get("wins", 0)
             losses = d.get("losses", 0)
             name   = d.get("riot_name") or f"<@{uid}>"
-            lines.append(f"{medal} **{name}** — {elo} ELO {label} | {wins}W/{losses}L")
+            lines.append(f"{medal} **{name}** — {rank['emoji']} **{rank['name']}** · {elo} | {wins}W/{losses}L")
 
         embed = disnake.Embed(
-            title="🏆 Custom ELO Leaderboard",
+            title="🏆 Eblot Leaderboard",
             description="\n".join(lines),
             color=disnake.Color.gold(),
         )
-        embed.set_footer(text="Custom ELO считается по результатам кастомных матчей")
+        embed.set_footer(text="Звания Eblot — отдельная лadder кастомок, не Ranked Valorant")
         await inter.edit_original_response(embed=embed)
 
     # ──────────────────────────────────────────────────────────────────

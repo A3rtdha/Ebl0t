@@ -1,7 +1,7 @@
 import disnake
 from disnake.ext import commands
 from ui.lobby_views import SetupModeView
-from utils import guild_setup, network_retry, custom_invite
+from utils import guild_setup, network_retry, custom_invite, ui_theme
 
 class Customs(commands.Cog):
     def __init__(self, bot):
@@ -24,14 +24,17 @@ class Customs(commands.Cog):
         invite_msg = await invite_channel.send(invite_text)
         custom_invite.register(inter.author.id, invite_channel.id, invite_msg.id)
 
-        embed = disnake.Embed(
-            title="🎮 Настройка Valorant Custom",
+        embed = ui_theme.brand_embed(
+            title="🎮  Настройка Valorant Custom",
             description=(
                 f"Категория матча: **{category.name}**\n"
-                f"Создавать кастомки: {customs_channel.mention} (писать могут только с ролью Valorant).\n\n"
-                f"Выберите режим:"
+                f"Создавать кастомки: {customs_channel.mention} (роль Valorant).\n"
+                f"{ui_theme.DIVIDER}\n"
+                f"**RANDOM** — дашборд: команды, карта, агенты → START\n"
+                f"**VOTED** — драфт (в разработке)\n\n"
+                f"После матча хост жмёт `/finish` · ранг в лобби — `/link`"
             ),
-            color=disnake.Color.red()
+            color=disnake.Color.red(),
         )
         
         view = SetupModeView()

@@ -202,14 +202,33 @@ def update_elos_after_match(
     _save(data)
     return changes
 
+EBLOT_TIERS: list[tuple[int, str, str]] = [
+    # (min_elo, emoji, name) — путь от зрителя в хабе до Prime
+    (0,    "🪑", "Зритель"),      # смотрит, редко попадает в impact
+    (850,  "📢", "Очередник"),    # пишет «+», ищет слот
+    (900,  "🎲", "Fill"),         # закрывает дырку в лобби
+    (950,  "⚔️", "Стачки"),       # дерётся, но без стабильности
+    (1000, "🎯", "Regular"),     # нормальный пикап-игрок
+    (1050, "🧩", "Ядро"),         # держит лобби, знает роли
+    (1100, "👑", "Хост"),         # уровень организатора
+    (1150, "🛡️", "Ветеран"),     # тащит и не руинит
+    (1220, "⚡", "Elite"),         # топ сервера
+    (1300, "✨", "Eblot Prime"),  # потолок
+]
+
+
+def custom_elo_to_rank(elo: int) -> dict:
+    """ELO → звание Eblot: emoji, name, label."""
+    tier = EBLOT_TIERS[0]
+    for min_elo, emoji, name in EBLOT_TIERS:
+        if elo >= min_elo:
+            tier = (min_elo, emoji, name)
+        else:
+            break
+    _, emoji, name = tier
+    return {"emoji": emoji, "name": name, "label": f"{emoji} {name}"}
+
+
 def custom_elo_to_rank_label(elo: int) -> str:
-    """Переводит custom ELO в читаемую метку."""
-    if elo < 850:   return "🩶 Iron"
-    if elo < 900:   return "🟫 Bronze"
-    if elo < 950:   return "⬜ Silver"
-    if elo < 1000:  return "🟡 Gold"
-    if elo < 1050:  return "🩵 Platinum"
-    if elo < 1100:  return "💎 Diamond"
-    if elo < 1150:  return "🟢 Ascendant"
-    if elo < 1220:  return "🔴 Immortal"
-    return "✨ Custom Radiant"
+    """Короткая метка для embed-ов."""
+    return custom_elo_to_rank(elo)["label"]

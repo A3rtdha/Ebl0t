@@ -1,18 +1,18 @@
 {
   "maps": [
-    "Ascent", "Bind", "Breeze", "Fracture", "Haven",
+    "Ascent", "Bind", "Breeze", "Corrode", "Fracture", "Haven",
     "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Abyss"
   ],
   "agents": {
-    "Дуэлянты": ["Jett", "Phoenix", "Reyna", "Raze", "Yoru", "Neon", "Iso"],
-    "Инициаторы": ["Sova", "Breach", "Skye", "KAY/O", "Fade", "Gekko"],
-    "Контроллеры": ["Brimstone", "Viper", "Omen", "Astra", "Harbor", "Clove"],
-    "Стражи": ["Killjoy", "Cypher", "Sage", "Chamber", "Deadlock", "Tejo"],
+    "Дуэлянты": ["Jett", "Phoenix", "Reyna", "Raze", "Yoru", "Neon", "Iso", "Waylay"],
+    "Инициаторы": ["Sova", "Breach", "Skye", "KAY/O", "Fade", "Gekko", "Tejo"],
+    "Контроллеры": ["Brimstone", "Viper", "Omen", "Astra", "Harbor", "Clove", "Miks"],
+    "Стражи": ["Killjoy", "Cypher", "Sage", "Chamber", "Deadlock", "Vyse", "Veto"],
     "Все": [
-      "Jett", "Phoenix", "Reyna", "Raze", "Yoru", "Neon", "Iso",
-      "Sova", "Breach", "Skye", "KAY/O", "Fade", "Gekko",
-      "Brimstone", "Viper", "Omen", "Astra", "Harbor", "Clove",
-      "Killjoy", "Cypher", "Sage", "Chamber", "Deadlock", "Tejo"
+      "Jett", "Phoenix", "Reyna", "Raze", "Yoru", "Neon", "Iso", "Waylay",
+      "Sova", "Breach", "Skye", "KAY/O", "Fade", "Gekko", "Tejo",
+      "Brimstone", "Viper", "Omen", "Astra", "Harbor", "Clove", "Miks",
+      "Killjoy", "Cypher", "Sage", "Chamber", "Deadlock", "Vyse", "Veto"
     ]
   }
 }

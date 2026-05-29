@@ -1,4 +1,4 @@
-"""Сообщение «собирает кастомку» в invite-канале — правим или удаляем при старте матча."""
+"""Анонс сбора в invite-канале — после создания лобби, удаляем при старте матча."""
 
 from __future__ import annotations
 
@@ -6,14 +6,53 @@ import logging
 
 import disnake
 
+from utils import guild_setup, ui_theme
+
 log = logging.getLogger(__name__)
 
 # host_id -> (channel_id, message_id)
 _pending: dict[int, tuple[int, int]] = {}
 
 
+def lobby_gather_embed(
+    host: disnake.Member | disnake.User,
+    voice_channel: disnake.VoiceChannel,
+    mode: str,
+) -> disnake.Embed:
+    return ui_theme.brand_embed(
+        title=f"⏳  Сбор игроков · {mode}",
+        description=(
+            f"**Организатор:** {host.mention}\n"
+            f"**Голосовой канал:** {voice_channel.mention}\n"
+            f"{ui_theme.DIVIDER}\n"
+            f"Заходите в голосовой канал. Когда все в сборе — "
+            f"организатор жмёт **«ВСЕ ГОТОВЫ»**."
+        ),
+        color=ui_theme.COLOR_WARN,
+    )
+
+
 def register(host_id: int, channel_id: int, message_id: int) -> None:
     _pending[host_id] = (channel_id, message_id)
+
+
+async def post_gather_announcement(
+    guild: disnake.Guild,
+    host: disnake.Member,
+    voice_channel: disnake.VoiceChannel,
+    mode: str,
+    *,
+    ping_role: disnake.Role | None = None,
+) -> None:
+    """Публичный анонс в 📢-сбор-на-кастомки (embed, без кнопок)."""
+    _, invite_channel, _ = await guild_setup.get_or_create_hub(guild)
+    content = ping_role.mention if ping_role else None
+    msg = await invite_channel.send(
+        content=content,
+        embed=lobby_gather_embed(host, voice_channel, mode),
+        allowed_mentions=disnake.AllowedMentions(roles=True, users=True),
+    )
+    register(host.id, invite_channel.id, msg.id)
 
 
 async def close_for_host(
@@ -22,7 +61,7 @@ async def close_for_host(
     *,
     customs_channel: disnake.abc.GuildChannel | None = None,
 ) -> None:
-    """Помечает сбор завершённым (редактирует сообщение в invite-канале)."""
+    """Удаляет анонс сбора — матч начался, пинг больше не нужен."""
     entry = _pending.pop(host.id, None)
     if not entry:
         return
@@ -32,15 +71,8 @@ async def close_for_host(
         return
     try:
         msg = await channel.fetch_message(msg_id)
-        customs_ref = customs_channel.mention if customs_channel else "канале кастомок"
-        await msg.edit(
-            content=(
-                f"✅ **{host.display_name}** — кастомка **началась**, сбор окончен.\n"
-                f"Играйте в {customs_ref}."
-            ),
-            suppress_embeds=True,
-        )
+        await msg.delete()
     except disnake.NotFound:
         pass
     except Exception as e:
-        log.warning(f"Не удалось обновить invite-сообщение: {e}")
+        log.warning("Не удалось удалить invite-сообщение: %s", e)

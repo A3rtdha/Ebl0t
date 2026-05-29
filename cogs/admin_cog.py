@@ -1,5 +1,61 @@
+import asyncio
+import datetime
+
 import disnake
 from disnake.ext import commands
+
+
+async def _bulk_delete_messages(channel: disnake.TextChannel, limit: int) -> int:
+    """
+    Удаляет последние limit сообщений.
+    Свежие (<14 дней) — bulk API (до 100 за запрос), старые — по одному.
+    """
+    cutoff = disnake.utils.utcnow() - datetime.timedelta(days=14)
+    bulk: list[disnake.Message] = []
+    singles: list[disnake.Message] = []
+
+    async for msg in channel.history(limit=limit):
+        if msg.pinned:
+            continue
+        if msg.created_at >= cutoff:
+            bulk.append(msg)
+        else:
+            singles.append(msg)
+
+    deleted = 0
+
+    for i in range(0, len(bulk), 100):
+        chunk = bulk[i : i + 100]
+        if len(chunk) == 1:
+            try:
+                await chunk[0].delete()
+                deleted += 1
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                pass
+        else:
+            try:
+                await channel.delete_messages(chunk)
+                deleted += len(chunk)
+            except disnake.HTTPException:
+                for msg in chunk:
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                        pass
+
+    if singles:
+        async def _delete_one(msg: disnake.Message) -> bool:
+            try:
+                await msg.delete()
+                return True
+            except (disnake.NotFound, disnake.Forbidden, disnake.HTTPException):
+                return False
+
+        results = await asyncio.gather(*(_delete_one(m) for m in singles))
+        deleted += sum(1 for ok in results if ok)
+
+    return deleted
 
 
 class AdminCog(commands.Cog):
@@ -109,9 +165,9 @@ class AdminCog(commands.Cog):
             )
 
         await inter.response.defer(ephemeral=True)
-        deleted = await inter.channel.purge(limit=amount)
+        deleted = await _bulk_delete_messages(inter.channel, amount)
         await inter.edit_original_response(
-            content=f"Удалено сообщений: **{len(deleted)}**."
+            content=f"Удалено сообщений: **{deleted}**."
         )
 
 

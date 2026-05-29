@@ -61,6 +61,12 @@ class MatchCog(commands.Cog):
         # чтобы лобби не разваливалось после /finish
         await _regroup_voice_channels(inter.guild, match_data)
 
+        dash_id = match_data.get("dashboard_msg_id")
+        dash_ch = match_data.get("text_channel_id") or inter.channel.id
+        if dash_id:
+            ch = inter.guild.get_channel(dash_ch) or inter.channel
+            await result_flow_cleanup.delete_message_ids(ch, [dash_id])
+
         match_manager.remove_active_match(inter.author.id)
 
         # Регистрируем ожидание скриншота

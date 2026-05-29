@@ -40,6 +40,8 @@ def save_active_match(
     team1_ids: list = None,
     team2_ids: list = None,
     team1_side: str = "attack",
+    dashboard_msg_id: int | None = None,
+    text_channel_id: int | None = None,
 ):
     data = _load()
     data[str(host_id)] = {
@@ -50,6 +52,8 @@ def save_active_match(
         "team1_ids":  [m.id if hasattr(m, "id") else int(m) for m in (team1_ids or [])],
         "team2_ids":  [m.id if hasattr(m, "id") else int(m) for m in (team2_ids or [])],
         "team1_side": team1_side,
+        "dashboard_msg_id": dashboard_msg_id,
+        "text_channel_id": text_channel_id,
         "started_at": int(time.time()),
     }
     _save(data)

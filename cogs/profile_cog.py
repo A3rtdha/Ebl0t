@@ -3,7 +3,7 @@ profile_cog.py — команды профиля и статистики.
 
 Команды:
   /link <riot_id> [region]  — привязать аккаунт
-  /profile [@user]          — карточка игрока с рангом и ELO
+  /profile [@user]          — карточка игрока (PNG)
   /stats [@user] [last]     — детальная статистика по кастомкам
   /history [@user]          — последние матчи
   /rank_refresh             — обновить ранг из API
@@ -13,15 +13,28 @@ profile_cog.py — команды профиля и статистики.
 
 import os
 import time
+import asyncio
 import logging
 import disnake
 from disnake.ext import commands
 from disnake.ext import tasks
-from utils import db_manager, riot_api, elo_engine
+from utils import db_manager, riot_api, elo_engine, profile_card
 
 log = logging.getLogger(__name__)
 
 REGIONS = ["eu", "na", "ap", "kr", "br", "latam"]
+
+
+async def _fetch_avatar_bytes(url: str) -> bytes | None:
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+    except Exception as e:
+        log.warning("profile: не удалось загрузить аватар: %s", e)
+    return None
 
 
 class Profile(commands.Cog):
@@ -125,48 +138,23 @@ class Profile(commands.Cog):
             tip = "Используй `/link`." if target == inter.author else f"{target.mention} ещё не привязал аккаунт."
             return await inter.edit_original_response(content=f"❓ Аккаунт не привязан. {tip}")
 
-        emoji = riot_api.rank_emoji(data["rank"])
         stats = db_manager.get_player_stats(target.id, last_n=20) or {}
-        custom_elo   = data.get("custom_elo")
-        custom_games = data.get("custom_games", 0)
-        updated_ts   = data.get("last_updated", 0)
+        avatar_bytes = await _fetch_avatar_bytes(str(target.display_avatar.with_size(256).url))
 
-        embed = disnake.Embed(title=f"👤 {target.display_name}", color=disnake.Color.blurple())
-        embed.set_thumbnail(url=target.display_avatar.url)
-        embed.add_field(name="Riot ID", value=f"`{data['riot_name']}#{data['riot_tag']}`", inline=True)
-        embed.add_field(name="Регион",  value=data.get("region", "eu").upper(), inline=True)
-        embed.add_field(name="Обновлено", value=f"<t:{updated_ts}:R>" if updated_ts else "—", inline=True)
-
-        embed.add_field(
-            name="Ranked ранг",
-            value=f"{emoji} **{data['rank']}** ({data.get('elo', 0)} ELO)",
-            inline=True,
+        buf = await asyncio.to_thread(
+            profile_card.render_profile_card,
+            display_name=target.display_name,
+            riot_id=f"{data['riot_name']}#{data['riot_tag']}",
+            rank=data["rank"],
+            custom_elo=data.get("custom_elo"),
+            custom_games=data.get("custom_games", 0),
+            stats=stats,
+            avatar_bytes=avatar_bytes,
+            updated_ts=data.get("last_updated", 0),
         )
-
-        if custom_elo:
-            rank = elo_engine.custom_elo_to_rank(custom_elo)
-            embed.add_field(
-                name="Звание Eblot",
-                value=f"**{rank['name']}** {rank['emoji']} · **{custom_elo}** ELO\n*{custom_games} кастомок*",
-                inline=True,
-            )
-        else:
-            embed.add_field(name="Звание Eblot", value="Калибровка — сыграй кастомку", inline=True)
-
-        # Последние 20 матчей
-        if stats.get("games", 0) > 0:
-            embed.add_field(
-                name=f"📊 Статистика (последние {stats['games']} матчей)",
-                value=(
-                    f"W/L: **{stats['wins']}W / {stats['losses']}L** ({stats['winrate']}% WR)\n"
-                    f"K/D/A: **{stats['avg_kills']} / {stats['avg_deaths']} / {stats['avg_assists']}** "
-                    f"(KD {stats['kd']})\n"
-                    f"ACS: **{int(stats['avg_acs'])}** | HS: **{stats['avg_hs']}%**"
-                ),
-                inline=False,
-            )
-
-        await inter.edit_original_response(embed=embed)
+        await inter.edit_original_response(
+            file=disnake.File(buf, filename=f"profile_{target.id}.png"),
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # /stats
@@ -224,10 +212,8 @@ class Profile(commands.Cog):
         embed.add_field(
             name="Боевые показатели",
             value=(
-                f"K/D/A: **{s['avg_kills']} / {s['avg_deaths']} / {s['avg_assists']}**\n"
-                f"KD Ratio: **{s['kd']}**\n"
-                f"ACS (средний): **{int(s['avg_acs'])}**\n"
-                f"HS%: **{s['avg_hs']}%**"
+                f"KD: **{s['kd']}** · KAD: **{s['kad']}**\n"
+                f"ACS: **{int(s['avg_acs'])}**"
             ),
             inline=True,
         )

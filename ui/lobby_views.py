@@ -3,7 +3,7 @@ import random
 import asyncio
 import logging
 from ui.dashboard_view import MatchDashboardView
-from utils import guild_setup, db_manager, riot_api
+from utils import guild_setup, db_manager, riot_api, custom_invite
 from utils import ui_theme
 
 log = logging.getLogger(__name__)
@@ -93,20 +93,15 @@ class SetupModeView(disnake.ui.View):
             await inter.edit_original_response(content="❌ Нет прав создавать каналы!")
             return
 
-        embed = ui_theme.brand_embed(
-            title=f"⏳  Сбор игроков · {mode_name}",
-            description=(
-                f"**Организатор:** {inter.author.mention}\n"
-                f"**Голосовой канал:** {vc.mention}\n"
-                f"{ui_theme.DIVIDER}\n"
-                f"Заходите в голосовой канал. Когда все в сборе — "
-                f"организатор жмёт **«ВСЕ ГОТОВЫ»**."
-            ),
-            color=ui_theme.COLOR_WARN,
-        )
+        embed = custom_invite.lobby_gather_embed(inter.author, vc, mode_name)
 
         view = WaitingRoomView(host=inter.author, voice_channel=vc, mode=mode_name)
         await inter.edit_original_response(embed=embed, view=view)
+
+        role = disnake.utils.get(inter.guild.roles, name="Valorant") or inter.guild.get_role(1474962323021234308)
+        await custom_invite.post_gather_announcement(
+            inter.guild, inter.author, vc, mode_name, ping_role=role,
+        )
 
     @disnake.ui.button(label="🎲 RANDOM", style=disnake.ButtonStyle.blurple, custom_id="mode_random")
     async def random_mode(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):

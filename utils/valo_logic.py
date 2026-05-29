@@ -65,6 +65,11 @@ def _get_weight(player, db_data: dict) -> float:
     return skill if skill is not None else DEFAULT_ELO
 
 
+def player_skill_elo(player, db_data: dict) -> int:
+    """ELO-сила игрока для баланса и отображения в лобби."""
+    return round(_get_weight(player, db_data))
+
+
 def team_average_skill(team: list, db_data: dict) -> int:
     """Средняя сила команды (ELO-шкала). 0 — если команда пуста."""
     if not team:

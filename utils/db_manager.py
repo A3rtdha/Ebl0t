@@ -189,7 +189,6 @@ def get_player_stats(discord_id: int, last_n: int = None) -> dict | None:
     deaths = sum(m.get("deaths",  1) for m in history)
     assists= sum(m.get("assists", 0) for m in history)
     acs_list = [m.get("acs", 0) for m in history if m.get("acs")]
-    hs_list  = [m.get("hs_percent", 0) for m in history if m.get("hs_percent")]
 
     return {
         "games":    games,
@@ -197,10 +196,7 @@ def get_player_stats(discord_id: int, last_n: int = None) -> dict | None:
         "losses":   games - wins,
         "winrate":  round(wins / games * 100) if games else 0,
         "kd":       round(kills / max(deaths, 1), 2),
-        "avg_kills":   round(kills  / games, 1),
-        "avg_deaths":  round(deaths / games, 1),
-        "avg_assists": round(assists/ games, 1),
+        "kad":      round((kills + assists) / max(deaths, 1), 2),
         "avg_acs":  round(sum(acs_list) / len(acs_list), 0) if acs_list else 0,
-        "avg_hs":   round(sum(hs_list)  / len(hs_list),  1) if hs_list  else 0,
         "history":  history,
     }

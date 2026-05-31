@@ -1,18 +1,17 @@
 import atexit
-import os
-import disnake
 import logging
+import os
 import subprocess
 import traceback
-from pathlib import Path
+
+import disnake
 from disnake.ext import commands
-from dotenv import load_dotenv
-from utils import aftermatch_voices, voice_time
-from ui.lobby_views import SetupModeView
 
-load_dotenv()
+from core.config import DISCORD_TOKEN, LOG_LEVEL, PROXY, ROOT
+from core.extension_loader import load_extensions
+from modules.valorant import setup as valorant_setup
+from modules.voice.storage import voice_time
 
-ROOT = Path(__file__).resolve().parent
 PID_FILE = ROOT / ".eblot.pid"
 
 
@@ -75,11 +74,11 @@ def _write_pid_file() -> None:
 
     atexit.register(_cleanup)
 
-_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
 logging.basicConfig(
-    level=getattr(logging, _log_level, logging.INFO),
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S'
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
 logging.getLogger("disnake").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -87,15 +86,10 @@ logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 logger = logging.getLogger("Bot")
 
-TOKEN = os.getenv('DISCORD_TOKEN')
-
 intents = disnake.Intents.default()
 intents.members = True
 intents.voice_states = True
 intents.message_content = True
-
-# Прокси: задай PROXY=http://... в .env если нужен, иначе оставь пустым
-PROXY = os.getenv('PROXY', '').strip() or None
 
 bot = commands.InteractionBot(
     intents=intents,
@@ -105,23 +99,15 @@ bot = commands.InteractionBot(
 
 @bot.event
 async def on_ready():
-    logger.info(f'✅ Бот {bot.user} запущен! Серверов: {len(bot.guilds)}')
+    logger.info("✅ Бот %s запущен! Серверов: %d", bot.user, len(bot.guilds))
     if PROXY:
-        logger.info(f'🔀 Прокси: {PROXY}')
-    bot.add_view(SetupModeView())
-    for guild in bot.guilds:
-        try:
-            await aftermatch_voices.ensure_channels(guild)
-        except Exception as e:
-            logger.warning('Aftermatch-каналы на %s: %s', guild.name, e)
+        logger.info("🔀 Прокси: %s", PROXY)
+    await valorant_setup.register(bot)
 
 
 @bot.event
 async def on_guild_join(guild: disnake.Guild):
-    try:
-        await aftermatch_voices.ensure_channels(guild)
-    except Exception as e:
-        logger.warning('Aftermatch-каналы на новом сервере %s: %s', guild.name, e)
+    await valorant_setup.on_guild_join(guild)
 
 
 def _is_network_error(exc: BaseException) -> bool:
@@ -135,13 +121,15 @@ def _is_network_error(exc: BaseException) -> bool:
 
 @bot.event
 async def on_slash_command_error(inter: disnake.ApplicationCommandInteraction, error):
-    # CommandInvokeError оборачивает реальную ошибку — раскрываем
-    original = getattr(error, 'original', error)
+    original = getattr(error, "original", error)
 
     logger.error(
-        f"❌ Ошибка /{inter.application_command.name} "
-        f"от {inter.author} ({inter.author.id}): "
-        f"{type(original).__name__}: {original}"
+        "❌ Ошибка /%s от %s (%s): %s: %s",
+        inter.application_command.name,
+        inter.author,
+        inter.author.id,
+        type(original).__name__,
+        original,
     )
     traceback.print_exception(type(original), original, original.__traceback__)
 
@@ -160,31 +148,19 @@ async def on_slash_command_error(inter: disnake.ApplicationCommandInteraction, e
 
 @bot.event
 async def on_error(event_method: str, *args, **kwargs):
-    logger.error(f"Необработанное исключение в {event_method}:")
+    logger.error("Необработанное исключение в %s:", event_method)
     traceback.print_exc()
 
 
-def load_cogs():
-    cogs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cogs')
-    for filename in sorted(os.listdir(cogs_dir)):
-        if filename.endswith('.py') and filename != '__init__.py':
-            try:
-                bot.load_extension(f'cogs.{filename[:-3]}')
-                logger.info(f'📦 {filename} загружен')
-            except Exception:
-                logger.error(f'❌ Ошибка загрузки {filename}:')
-                traceback.print_exc()
-
-
-if __name__ == '__main__':
-    if not TOKEN:
+if __name__ == "__main__":
+    if not DISCORD_TOKEN:
         logger.critical("DISCORD_TOKEN не задан в .env!")
         exit(1)
 
     _ensure_single_instance()
     _write_pid_file()
-    load_cogs()
+    load_extensions(bot)
     try:
-        bot.run(TOKEN)
+        bot.run(DISCORD_TOKEN)
     except Exception as e:
-        logger.critical(f"Не удалось запустить: {e}")
+        logger.critical("Не удалось запустить: %s", e)

@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from utils import screenshot_parser
+from modules.valorant.services import screenshot_parser
 
 DEFAULT_IMAGE = ROOT / "Screenshot 2026-05-28 230045.png"
 

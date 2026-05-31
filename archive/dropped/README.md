@@ -1,5 +1,5 @@
 # Dropped / archived ideas
 
-Сюда складываем отключённые варианты UI и команд, чтобы не мешали основному коду.
+Сюда складываем отключённые варианты, чтобы не мешали основному коду.
 
-- `profile_embed.py` — текстовый `/profile` через Discord embed (заменён PNG-карточкой).
+- Текстовый `/profile` через embed — заменён PNG (`modules/valorant/services/profile_card.py`).

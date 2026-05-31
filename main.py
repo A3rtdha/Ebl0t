@@ -7,7 +7,8 @@ import traceback
 from pathlib import Path
 from disnake.ext import commands
 from dotenv import load_dotenv
-from utils import aftermatch_voices
+from utils import aftermatch_voices, voice_time
+from ui.lobby_views import SetupModeView
 
 load_dotenv()
 
@@ -63,6 +64,10 @@ def _write_pid_file() -> None:
 
     def _cleanup() -> None:
         try:
+            voice_time.flush_active_sessions()
+        except Exception:
+            pass
+        try:
             if PID_FILE.exists() and int(PID_FILE.read_text(encoding="utf-8")) == os.getpid():
                 PID_FILE.unlink()
         except (ValueError, OSError):
@@ -70,8 +75,9 @@ def _write_pid_file() -> None:
 
     atexit.register(_cleanup)
 
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, _log_level, logging.INFO),
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -102,6 +108,7 @@ async def on_ready():
     logger.info(f'✅ Бот {bot.user} запущен! Серверов: {len(bot.guilds)}')
     if PROXY:
         logger.info(f'🔀 Прокси: {PROXY}')
+    bot.add_view(SetupModeView())
     for guild in bot.guilds:
         try:
             await aftermatch_voices.ensure_channels(guild)

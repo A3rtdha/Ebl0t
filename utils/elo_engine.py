@@ -29,14 +29,6 @@ def _save(data):
     with open(DB_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_custom_elo(discord_id: int) -> int:
-    data = _load()
-    player = data["players"].get(str(discord_id), {})
-    if "custom_elo" not in player:
-        start = RANK_TO_START_ELO.get(player.get("rank_weight", 0), 1000)
-        return start
-    return player["custom_elo"]
-
 # ==========================================
 # ЯДРО МАТЕМАТИКИ СИСТЕМЫ
 # ==========================================

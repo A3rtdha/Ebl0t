@@ -40,20 +40,3 @@ def brand_embed(
     embed = disnake.Embed(title=title, description=description, color=color)
     embed.set_footer(text=footer or BRAND_FOOTER)
     return embed
-
-
-def apply_brand(embed: disnake.Embed, color: disnake.Color | None = None) -> disnake.Embed:
-    """Доводит существующий эмбед до фирменного стиля (футер + цвет)."""
-    if color is not None:
-        embed.color = color
-    if not (embed.footer and embed.footer.text):
-        embed.set_footer(text=BRAND_FOOTER)
-    return embed
-
-
-def progress_bar(value: int, maximum: int, length: int = 10) -> str:
-    """Текстовый прогресс-бар: ▰▰▰▱▱▱▱▱▱▱"""
-    if maximum <= 0:
-        return "▱" * length
-    filled = round(length * max(0, min(value, maximum)) / maximum)
-    return "▰" * filled + "▱" * (length - filled)

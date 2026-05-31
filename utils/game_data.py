@@ -17,9 +17,6 @@ def get_maps() -> list[str]:
 def get_agents(role: str = "Все") -> list[str]:
     return _load()["agents"].get(role, _load()["agents"]["Все"])
 
-def get_all_roles() -> list[str]:
-    return [r for r in _load()["agents"].keys() if r != "Все"]
-
 # Обратная совместимость — старый код использовал MAP_POOL и AGENT_POOL напрямую
 MAP_POOL   = get_maps()
 AGENT_POOL = get_agents()

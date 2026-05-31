@@ -25,11 +25,19 @@ async def _sync_lobby_ranks(players: list):
         log.warning(f"Сверка рангов лобби не удалась: {e}")
 
 class WaitingRoomView(disnake.ui.View):
-    def __init__(self, host: disnake.Member, voice_channel: disnake.VoiceChannel, mode: str):
+    def __init__(
+        self,
+        host: disnake.Member,
+        voice_channel: disnake.VoiceChannel,
+        mode: str,
+        *,
+        dev_mode: bool = False,
+    ):
         super().__init__(timeout=None)
         self.host = host
         self.voice_channel = voice_channel
         self.mode = mode
+        self.dev_mode = dev_mode
 
     @disnake.ui.button(label="✅ ВСЕ ГОТОВЫ", style=disnake.ButtonStyle.success, custom_id="all_ready")
     async def all_ready_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
@@ -37,8 +45,14 @@ class WaitingRoomView(disnake.ui.View):
             await inter.response.send_message(f"Вы не хост, ожидайте {self.host.mention}.", ephemeral=True)
             return
 
-        members_in_vc = self.voice_channel.members
-        
+        vc = inter.guild.get_channel(self.voice_channel.id)
+        if not isinstance(vc, disnake.VoiceChannel):
+            return await inter.response.send_message(
+                "❌ Голосовой канал ожидания не найден (удалён?). Создай лобби заново через `/custom`.",
+                ephemeral=True,
+            )
+        members_in_vc = vc.members
+
         # --- ВАЛИДАЦИЯ (Для тестов отключена) ---
         # players_count = len(members_in_vc)
         # if players_count == 0 or players_count % 2 != 0:
@@ -49,36 +63,25 @@ class WaitingRoomView(disnake.ui.View):
         
         # Если в ГК пусто (тест), берем хоста
         players_list_obj = members_in_vc if len(members_in_vc) > 0 else [inter.author]
-        players_desc = "\n".join([f"• {m.mention}" for m in players_list_obj])
 
         # Автоматически сверяем ранги в фоне, пока хост настраивает матч
         asyncio.create_task(_sync_lobby_ranks(list(players_list_obj)))
 
-        embed = ui_theme.brand_embed(
-            title=f"⚔️  Настройка матча · {self.mode}",
-            description=(
-                f"**Игроки в лобби — {len(players_list_obj)}**\n"
-                f"{ui_theme.DIVIDER}\n"
-                f"{players_desc}\n\n"
-                f"➤ Жми **TEAM → MAP → AGENTS**, затем **START**."
-            ),
-            color=ui_theme.COLOR_PRIMARY,
-        )
-        
-        # ПЕРЕДАЕМ self.voice_channel (чтобы потом его удалить)
         view = MatchDashboardView(
-            host=self.host, 
-            players=players_list_obj, 
-            mode=self.mode, 
-            source_channel=self.voice_channel 
+            host=self.host,
+            players=players_list_obj,
+            mode=self.mode,
+            source_channel=self.voice_channel,
+            dev_mode=self.dev_mode,
         )
 
-        await inter.edit_original_response(embed=embed, view=view)
+        await inter.edit_original_response(embed=view.build_embed(), view=view)
 
 
 class SetupModeView(disnake.ui.View):
-    def __init__(self):
+    def __init__(self, *, dev_mode: bool = False):
         super().__init__(timeout=None)
+        self.dev_mode = dev_mode
 
     async def create_lobby(self, inter: disnake.MessageInteraction, mode_name: str):
         await inter.response.defer()
@@ -93,15 +96,20 @@ class SetupModeView(disnake.ui.View):
             await inter.edit_original_response(content="❌ Нет прав создавать каналы!")
             return
 
-        embed = custom_invite.lobby_gather_embed(inter.author, vc, mode_name)
+        embed = custom_invite.lobby_gather_embed(
+            inter.author, vc, mode_name, dev_mode=self.dev_mode,
+        )
 
-        view = WaitingRoomView(host=inter.author, voice_channel=vc, mode=mode_name)
+        view = WaitingRoomView(
+            host=inter.author, voice_channel=vc, mode=mode_name, dev_mode=self.dev_mode,
+        )
         await inter.edit_original_response(embed=embed, view=view)
 
-        role = disnake.utils.get(inter.guild.roles, name="Valorant") or inter.guild.get_role(1474962323021234308)
-        await custom_invite.post_gather_announcement(
-            inter.guild, inter.author, vc, mode_name, ping_role=role,
-        )
+        if not self.dev_mode:
+            role = await guild_setup.get_or_create_valorant_role(inter.guild)
+            await custom_invite.post_gather_announcement(
+                inter.guild, inter.author, vc, mode_name, ping_role=role,
+            )
 
     @disnake.ui.button(label="🎲 RANDOM", style=disnake.ButtonStyle.blurple, custom_id="mode_random")
     async def random_mode(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):

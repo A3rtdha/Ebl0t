@@ -138,36 +138,3 @@ def split_teams_balanced(players: list) -> tuple[list, list]:
 # Старый метод оставляем для совместимости (используется в рандом-режиме без БД)
 def split_teams(players):
     return split_teams_balanced(players)
-
-
-def format_teams_embed_fields(team1: list, team2: list, db_data: dict = None) -> tuple[str, str]:
-    """
-    Формирует строки для embed-полей команд с указанием рангов.
-    Если db_data=None — подтягивает сам.
-    """
-    if db_data is None:
-        ids = [p.id for p in team1 + team2]
-        db_data = db_manager.get_players_bulk(ids)
-
-    def fmt_player(p):
-        entry = db_data.get(p.id)
-        if entry:
-            from .riot_api import rank_emoji
-            emoji = rank_emoji(entry["rank"])
-            return f"{emoji} {p.mention} — {entry['rank']}"
-        return f"❓ {p.mention} — не привязан"
-
-    t1_str = "\n".join(fmt_player(p) for p in team1)
-    t2_str = "\n".join(fmt_player(p) for p in team2)
-
-    def _avg(team):
-        if not team:
-            return 0
-        return round(sum(_get_weight(p, db_data) for p in team) / len(team))
-
-    t1_avg, t2_avg = _avg(team1), _avg(team2)
-
-    t1_str += f"\n\n*Средняя сила: {t1_avg}*"
-    t2_str += f"\n\n*Средняя сила: {t2_avg}*"
-
-    return t1_str, t2_str

@@ -68,12 +68,21 @@ async def _dm_agent_cards(view: "MatchDashboardView", members: list) -> None:
 
 # --- ГЛАВНОЕ МЕНЮ ---
 class MatchDashboardView(disnake.ui.View):
-    def __init__(self, host: disnake.Member, players: list, mode: str, source_channel: disnake.VoiceChannel):
+    def __init__(
+        self,
+        host: disnake.Member,
+        players: list,
+        mode: str,
+        source_channel: disnake.VoiceChannel,
+        *,
+        dev_mode: bool = False,
+    ):
         super().__init__(timeout=None)
         self.host = host
         self.players = players
         self.mode = mode
         self.source_channel = source_channel
+        self.dev_mode = dev_mode
         
         self.team1 = []
         self.team2 = []
@@ -92,6 +101,62 @@ class MatchDashboardView(disnake.ui.View):
             if child.custom_id in ("dash_reroll", "dash_my_agent"):
                 child.disabled = False
 
+    def build_embed(self) -> disnake.Embed:
+        is_ready = bool((self.team1 or self.team2) and self.selected_map and self.agent_assignments)
+        steps = [
+            ("Команды", bool(self.team1 or self.team2)),
+            ("Карта", bool(self.selected_map)),
+            ("Агенты", bool(self.agent_assignments)),
+        ]
+        status_line = "  ".join(f"{'✅' if ok else '⬜'} {name}" for name, ok in steps)
+        map_val = f"**{self.selected_map}**" if self.selected_map else "*не выбрана*"
+
+        all_players = self.team1 + self.team2
+        db_data = db_manager.get_players_bulk([m.id for m in all_players]) if all_players else {}
+
+        def format_team(team_list):
+            if not team_list:
+                return "—"
+            blocks = []
+            for member in team_list:
+                skill = valo_logic.player_skill_elo(member, db_data)
+                agent = self.agent_assignments.get(member)
+                sub_line = f"ELO **{skill}**"
+                if agent:
+                    sub_line += f" · 🕵️ **{agent}**"
+                blocks.append(f"{member.mention}\n-# {sub_line}")
+            body = "\n\n".join(blocks)
+            avg = valo_logic.team_average_skill(team_list, db_data)
+            if avg:
+                body += f"\n\n{ui_theme.DIVIDER}\n-# ⚖️ Средняя команды: **{avg}**"
+            return body
+
+        desc = (
+            f"**Хост:** {self.host.mention}\n"
+            f"📍 Карта: {map_val}  ·  {status_line}"
+        )
+        if self.dev_mode:
+            desc += f"\n{ui_theme.DIVIDER}\n-# 🔧 DEV · завершение: **`/finish`** в этом канале"
+
+        embed = ui_theme.brand_embed(
+            title=f"⚔️  Настройка матча · {self.mode}",
+            description=desc,
+            color=ui_theme.COLOR_SUCCESS if is_ready else ui_theme.COLOR_PRIMARY,
+        )
+        embed.add_field(name=f"🔵 Атака · {len(self.team1)}", value=format_team(self.team1), inline=True)
+        embed.add_field(name=f"🔴 Защита · {len(self.team2)}", value=format_team(self.team2), inline=True)
+        if self.agent_assignments:
+            unassigned = [m for m in self.players if m not in self.agent_assignments]
+            if unassigned:
+                embed.add_field(
+                    name="⚠️ Без агента",
+                    value="\n".join(m.mention for m in unassigned),
+                    inline=False,
+                )
+        footer = "🔧 DEV" if self.dev_mode else ui_theme.BRAND_FOOTER
+        embed.set_footer(text=footer)
+        return embed
+
     async def update_message(self, inter: disnake.MessageInteraction):
         is_ready = bool((self.team1 or self.team2) and self.selected_map and self.agent_assignments)
 
@@ -106,48 +171,7 @@ class MatchDashboardView(disnake.ui.View):
                     child.style = disnake.ButtonStyle.gray
                     child.label = "⌛ WAITING SETUP..."
 
-        embed = inter.message.embeds[0]
-        embed.clear_fields()
-
-        steps = [
-            ("Команды", bool(self.team1 or self.team2)),
-            ("Карта",   bool(self.selected_map)),
-            ("Агенты",  bool(self.agent_assignments)),
-        ]
-        status_line = "  ".join(f"{'✅' if ok else '⬜'} {name}" for name, ok in steps)
-        map_val = f"**{self.selected_map}**" if self.selected_map else "*не выбрана*"
-        embed.description = f"📍 {map_val}  ·  {status_line}"
-
-        all_players = self.team1 + self.team2
-        db_data = db_manager.get_players_bulk([m.id for m in all_players]) if all_players else {}
-
-        def format_team(team_list):
-            if not team_list:
-                return "—"
-            lines = []
-            for member in team_list:
-                skill = valo_logic.player_skill_elo(member, db_data)
-                lines.append(f"{member.mention} · **{skill}**")
-            avg = valo_logic.team_average_skill(team_list, db_data)
-            if avg:
-                lines.append(f"\n*⚖️ Средняя: **{avg}***")
-            return "\n".join(lines)
-
-        embed.add_field(
-            name=f"🔵 Атака · {len(self.team1)}",
-            value=format_team(self.team1),
-            inline=True,
-        )
-        embed.add_field(
-            name=f"🔴 Защита · {len(self.team2)}",
-            value=format_team(self.team2),
-            inline=True,
-        )
-
-        embed.color = ui_theme.COLOR_SUCCESS if is_ready else ui_theme.COLOR_PRIMARY
-        embed.set_footer(text=ui_theme.BRAND_FOOTER)
-
-        await inter.response.edit_message(embed=embed, view=self)
+        await inter.response.edit_message(embed=self.build_embed(), view=self)
 
     # --- КНОПКИ ---
     @disnake.ui.button(label="👥 TEAM", style=disnake.ButtonStyle.blurple, custom_id="dash_team", row=0)
@@ -165,7 +189,12 @@ class MatchDashboardView(disnake.ui.View):
             return await inter.response.send_message("Только хост!", ephemeral=True)
         random_maps = valo_logic.get_random_maps()
         view = MapSelectionView(self.host, self, random_maps)
-        await inter.response.edit_message(view=view)
+        embed = ui_theme.brand_embed(
+            title="🗺️  Выбор карты",
+            description="Хост, нажми одну из кнопок ниже.",
+            color=ui_theme.COLOR_PRIMARY,
+        )
+        await inter.response.edit_message(embed=embed, view=view)
 
     @disnake.ui.button(label="🕵️ AGENTS", style=disnake.ButtonStyle.blurple, custom_id="dash_agents", row=0)
     async def agents_btn(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
@@ -176,7 +205,17 @@ class MatchDashboardView(disnake.ui.View):
         button.style = disnake.ButtonStyle.gray
         self._enable_agent_buttons()
         await self.update_message(inter)
-        await _dm_agent_cards(self, self.players)
+        if self.dev_mode:
+            lines = [
+                f"{m.display_name}: **{self.agent_assignments.get(m, '—')}**"
+                for m in self.players
+            ]
+            await inter.followup.send(
+                "🕵️ **Агенты (DEV)** — см. также в embed выше:\n" + "\n".join(lines),
+                ephemeral=True,
+            )
+        else:
+            await _dm_agent_cards(self, self.players)
 
     @disnake.ui.button(
         label="🕵️ Мой агент",
@@ -266,14 +305,15 @@ class MatchDashboardView(disnake.ui.View):
             if self.source_channel: await self.source_channel.delete()
         except: pass
 
-        embed = inter.message.embeds[0]
-        embed.title = f"🚀  Матч #{lobby_id} · {self.selected_map or '—'}"
-        embed.color = ui_theme.COLOR_SUCCESS
-        embed.clear_fields()
-        embed.description = f"{self.host.mention} — **GL & HF!** 🔥"
-        embed.add_field(name="🔵 Атака",  value=vc_team1.mention, inline=True)
+        embed = ui_theme.brand_embed(
+            title=f"🚀  Матч #{lobby_id} · {self.selected_map or '—'}",
+            description=f"{self.host.mention} — **GL & HF!** 🔥",
+            color=ui_theme.COLOR_SUCCESS,
+        )
+        embed.add_field(name="🔵 Атака", value=vc_team1.mention, inline=True)
         embed.add_field(name="🔴 Защита", value=vc_team2.mention, inline=True)
-        embed.set_footer(text=f"{ui_theme.BRAND_FOOTER}  ·  /finish — завершить матч")
-
+        finish_hint = "🔧 DEV · /finish" if self.dev_mode else f"{ui_theme.BRAND_FOOTER}  ·  /finish"
+        embed.set_footer(text=f"{finish_hint} — завершить матч")
         await inter.edit_original_response(embed=embed, view=None)
-        await custom_invite.close_for_host(guild, self.host, customs_channel=inter.channel)
+        if not self.dev_mode:
+            await custom_invite.close_for_host(guild, self.host, customs_channel=inter.channel)

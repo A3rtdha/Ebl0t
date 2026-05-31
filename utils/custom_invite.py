@@ -18,9 +18,12 @@ def lobby_gather_embed(
     host: disnake.Member | disnake.User,
     voice_channel: disnake.VoiceChannel,
     mode: str,
+    *,
+    dev_mode: bool = False,
 ) -> disnake.Embed:
-    return ui_theme.brand_embed(
-        title=f"⏳  Сбор игроков · {mode}",
+    footer = "🔧 DEV · без публичного анонса" if dev_mode else ui_theme.BRAND_FOOTER
+    embed = ui_theme.brand_embed(
+        title=f"⏳  Сбор игроков · {mode}" + (" · DEV" if dev_mode else ""),
         description=(
             f"**Организатор:** {host.mention}\n"
             f"**Голосовой канал:** {voice_channel.mention}\n"
@@ -28,8 +31,10 @@ def lobby_gather_embed(
             f"Заходите в голосовой канал. Когда все в сборе — "
             f"организатор жмёт **«ВСЕ ГОТОВЫ»**."
         ),
-        color=ui_theme.COLOR_WARN,
+        color=disnake.Color.orange() if dev_mode else ui_theme.COLOR_WARN,
     )
+    embed.set_footer(text=footer)
+    return embed
 
 
 def register(host_id: int, channel_id: int, message_id: int) -> None:

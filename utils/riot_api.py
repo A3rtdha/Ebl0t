@@ -172,36 +172,6 @@ async def refresh_ranks_bulk(
     return updated
 
 
-async def get_player_puuid(name: str, tag: str) -> str | None:
-    try:
-        import aiohttp
-    except ImportError:
-        return None
-
-    url = f"{HENRIK_BASE}/v1/account/{name}/{tag}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-        return data.get("data", {}).get("puuid")
-    except Exception as e:
-        log.error(f"Ошибка PUUID для {name}#{tag}: {e}")
-        return None
-
-
-def rank_to_weight(rank_str: str) -> int:
-    return RANK_WEIGHTS.get(rank_str, 0)
-
-
-def weight_to_rank(weight: int) -> str:
-    for rank, w in RANK_WEIGHTS.items():
-        if w == weight:
-            return rank
-    return "Unrated"
-
-
 def rank_emoji(rank_str: str) -> str:
     tier = rank_str.split(" ")[0] if rank_str else "Unrated"
     return RANK_EMOJIS.get(tier, "❓")

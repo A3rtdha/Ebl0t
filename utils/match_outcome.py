@@ -47,7 +47,11 @@ def apply_team_outcome(
 
 
 def guess_winner_team_from_parsed(parsed: dict, match_data: dict) -> int | None:
-    """Пытается угадать команду-победителя из OCR, победы хоста и счёта."""
+    """Пытается угадать команду-победителя из OCR, победы хоста и счёта.
+
+    Вызывается из UI wizard (`ui/match_outcome`) и через обёртку
+    `_infer_winner_team` в `match_cog` (там дополняется host_id/host_team из Member).
+    """
     if parsed.get("winner_team") in (1, 2):
         return parsed["winner_team"]
 

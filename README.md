@@ -5,9 +5,10 @@ Discord-бот для автоматизации кастомных матчей
 ## Возможности
 
 ### Лобби и матч
-- `/custom` — создание кастомки (режим **RANDOM**; **VOTED** в планах)
+- `/custom` — создание кастомки только в **📋-создание-кастомок** (режим **RANDOM**; **VOTED** в планах)
+- `/dev` — тот же флоу без пинга и анонса в сбор (только владелец, ID в `customs_cog.py`)
 - Голосовой канал ожидания, кнопка «ВСЕ ГОТОВЫ» (только хост)
-- Dashboard: **TEAM**, **MAP**, **AGENTS**, персональный **REROLL**
+- Dashboard (embed + кнопки): **TEAM**, **MAP**, **AGENTS**, персональный **REROLL**
 - Авто-создание каналов Attack / Defense и перемещение игроков
 - `/finish` — завершение матча, OCR scoreboard (Gemini Vision + Tesseract fallback), wizard исхода
 - Aftermatch: сбор игроков в общий голосовой канал после `/finish`
@@ -23,6 +24,8 @@ Discord-бот для автоматизации кастомных матчей
 - `/move` — перенос всех участников из одного голосового канала в другой
 - `/clean` — удаление последних сообщений в чате (нужны права модератора)
 - `/ping` — проверка связи и зависимостей
+- `/voice_stats` — сколько времени ты (или участник) в голосовых на сервере
+- `/voice_top` — таблица лидеров по времени в VC
 
 ## Технологии
 
@@ -42,12 +45,15 @@ Discord-бот для автоматизации кастомных матчей
    | Переменная | Назначение |
    |------------|------------|
    | `DISCORD_TOKEN` | Токен бота (обязательно) |
+   | `PROXY` | Прокси для Discord (http/https/socks5); опционально |
    | `HENRIK_API_KEY` | Riot ranked через Henrik Dev API |
    | `GEMINI_API_KEY` | OCR scoreboard через Gemini Vision |
    | `GEMINI_MODEL` | Модель Gemini (по умолчанию `gemini-2.5-flash`) |
-   | `PROXY` | Прокси для Discord (http/https/socks5) |
    | `GEMINI_PROXY` | Отдельный прокси для Gemini (если не задан — берётся `PROXY`) |
    | `TESSERACT_CMD` | Путь к `tesseract.exe` на Windows |
+   | `LOG_LEVEL` | Уровень логов (`INFO` по умолчанию) |
+
+   Роль **Valorant** — для пинга и прав в канале кастомок; бот **создаёт** её при первом hub/лобби, если на сервере ещё нет (нужно право **Manage Roles**).
 
 3. **Запуск:**
    ```bash
@@ -68,7 +74,7 @@ cogs/     — slash-команды (custom, match, profile, admin, debug)
 ui/       — views, modals, dashboard
 utils/    — OCR, ELO, БД, Riot API, aftermatch voices
 data/     — game_data.json (статика); runtime JSON — в .gitignore
-scripts/  — локальные тесты OCR и ручной apply матча
+scripts/  — локальные тесты OCR
 proxy/    — локальные sing-box конфиги (в .gitignore)
 ```
 
@@ -79,9 +85,6 @@ Runtime-данные (`data/data.json`, `data/active_matches.json`) создаю
 ```bash
 # Тест парсера скриншота (нужен локальный PNG)
 python scripts/test_screenshot_parse.py path/to/scoreboard.png
-
-# Ручной apply матча из распознанного scoreboard
-python scripts/apply_match_from_screen.py
 ```
 
 ## Документация

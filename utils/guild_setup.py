@@ -3,7 +3,31 @@ import disnake
 CATEGORY_NAME = "🤖 VALORANT HUB"
 INVITE_CHANNEL_NAME = "📢-сбор-на-кастомки"
 CUSTOMS_CHANNEL_NAME = "📋-создание-кастомок"
-VALORANT_ROLE_ID = 1474962323021234308  # запасной поиск роли по ID (если имя другое)
+VALORANT_ROLE_NAME = "Valorant"
+VALORANT_ROLE_ID = 1474962323021234308  # legacy: если роль переименовали, но ID тот же
+VALORANT_ROLE_COLOR = disnake.Color.from_rgb(255, 70, 85)
+
+
+def get_valorant_role(guild: disnake.Guild) -> disnake.Role | None:
+    """Синхронный поиск роли (без создания)."""
+    return disnake.utils.get(guild.roles, name=VALORANT_ROLE_NAME) or guild.get_role(VALORANT_ROLE_ID)
+
+
+async def get_or_create_valorant_role(guild: disnake.Guild) -> disnake.Role | None:
+    """Роль Valorant для пинга и прав; создаёт, если на сервере нет."""
+    role = get_valorant_role(guild)
+    if role:
+        return role
+    try:
+        return await guild.create_role(
+            name=VALORANT_ROLE_NAME,
+            color=VALORANT_ROLE_COLOR,
+            mentionable=True,
+            reason="Eblot: роль для кастомок Valorant",
+        )
+    except disnake.Forbidden:
+        return None
+
 
 async def get_or_create_hub(guild: disnake.Guild):
     """Находит или создает категорию и текстовые каналы для бота"""
@@ -35,7 +59,7 @@ async def get_or_create_hub(guild: disnake.Guild):
         None
     )
     if not customs_channel:
-        role = disnake.utils.get(guild.roles, name="Valorant") or guild.get_role(VALORANT_ROLE_ID)
+        role = await get_or_create_valorant_role(guild)
         overwrites = {
             guild.default_role: disnake.PermissionOverwrite(view_channel=True, send_messages=False),
             guild.me: disnake.PermissionOverwrite(send_messages=True),

@@ -19,6 +19,7 @@ from disnake.ext import commands
 from utils import match_manager, db_manager, elo_engine, screenshot_parser, riot_api, ui_theme, aftermatch_voices
 from ui.modals import ManualScoreboardModal
 from ui.match_outcome import prompt_match_outcome, team_label
+from utils.match_outcome import guess_winner_team_from_parsed
 from utils.manual_scoreboard import parsed_to_manual_text, MANUAL_FORMAT_HELP
 from utils import result_flow_cleanup
 import asyncio
@@ -487,37 +488,17 @@ def _normalize_host_relative_teams(parsed: dict, host, match_data: dict) -> dict
 
 
 def _infer_winner_team(parsed: dict, host, match_data: dict) -> int | None:
-    """Автоматически переводит host_won/score в team1/team2."""
-    winner_team = parsed.get("winner_team")
-    if winner_team in (1, 2):
-        return winner_team
-
-    host_won = parsed.get("host_won")
+    """Обогащает OCR-данные хостом из match_data и делегирует в match_outcome."""
+    enriched = dict(parsed)
     host_id = getattr(host, "id", None)
-    if host_won is not None and host_id is not None:
+    if enriched.get("host_id") is None and host_id is not None:
+        enriched["host_id"] = host_id
+    if enriched.get("host_team") is None and host_id is not None:
         if host_id in set(match_data.get("team1_ids", [])):
-            return 1 if host_won else 2
-        if host_id in set(match_data.get("team2_ids", [])):
-            return 2 if host_won else 1
-
-    sa, sd = parsed.get("score_attack"), parsed.get("score_defense")
-    try:
-        sa, sd = int(sa), int(sd)
-    except (TypeError, ValueError):
-        return None
-    if sa == 13 and sd < 13:
-        winner_side = "attack"
-    elif sd == 13 and sa < 13:
-        winner_side = "defense"
-    elif sa != sd:
-        winner_side = "attack" if sa > sd else "defense"
-    else:
-        return None
-
-    team1_side = match_data.get("team1_side", "attack")
-    if winner_side == team1_side:
-        return 1
-    return 2
+            enriched["host_team"] = 1
+        elif host_id in set(match_data.get("team2_ids", [])):
+            enriched["host_team"] = 2
+    return guess_winner_team_from_parsed(enriched, match_data)
 
 
 async def _start_result_flow_locked(channel, host, guild, parsed: dict, match_data: dict, bot=None):
@@ -1043,69 +1024,79 @@ async def _finalize_match_body(channel, parsed: dict, match_data: dict,
     linked_fresh = db_manager.get_players_bulk(all_ids)
 
     # ── Embed результатов ──────────────────────────────────────────────
-    embed = ui_theme.brand_embed(title="🏆  Матч завершён!", color=ui_theme.COLOR_SUCCESS)
     if score_winner is not None and score_loser is not None:
-        score_display = f"# {score_winner} : {score_loser}"
+        sw, sl = score_winner, score_loser
     else:
-        score_display = f"# {score_atk} : {score_def}"
-    embed.description = (
-        f"🥇  **{winner_label}**\n"
-        f"{score_display}\n"
-        f"{ui_theme.DIVIDER}"
+        sw, sl = score_atk, score_def
+
+    embed = ui_theme.brand_embed(
+        title="🏆  Матч завершён",
+        description=f"### 🥇 {winner_label}",
+        color=ui_theme.COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name="Счёт",
+        value=f"**{sw}**  ·  **{sl}**",
+        inline=True,
     )
 
-    # Таблица по игрокам — сортируем по ACS (как в игре)
     sorted_players = sorted(players_raw, key=lambda p: p.get("acs", 0) or 0, reverse=True)
-    perf_lines = []
+    perf_blocks = []
     for p in sorted_players:
         riot_id = p.get("riot_id", "?")
-        k  = p.get("kills",   0)
-        d  = p.get("deaths",  0)
-        a  = p.get("assists", 0)
-        acs = p.get("acs",   0)
-        hs  = p.get("hs_percent")
-        hs_str = f" · HS {hs}%" if hs is not None else ""
-        team_icon = "🔵" if p.get("team") == "attack" else "🔴"
-        perf_lines.append(
-            f"{team_icon} `{acs:>3}` ACS · {k}/{d}/{a}{hs_str} — **{riot_id}**"
-        )
+        k = p.get("kills", 0)
+        d = p.get("deaths", 0)
+        a = p.get("assists", 0)
+        acs = p.get("acs", 0) or 0
+        hs = p.get("hs_percent")
+        is_attack = p.get("team") == "attack"
+        team_icon = "🔵" if is_attack else "🔴"
+        side = "Атака" if is_attack else "Защита"
+        stat_line = f"{team_icon} {side} · **{acs}** ACS · {k}/{d}/{a}"
+        if hs is not None:
+            stat_line += f" · HS **{hs}%**"
+        perf_blocks.append(f"**{riot_id}**\n-# {stat_line}")
 
-    if perf_lines:
+    if perf_blocks:
         embed.add_field(
-            name="📋  Статистика (по ACS)",
-            value="\n".join(perf_lines),
+            name="📋  Статистика",
+            value="\n\n".join(perf_blocks),
             inline=False,
         )
 
-    # ELO изменения (с отображением импакта)
-    elo_lines = []
+    elo_blocks = []
     for uid, ch in elo_changes.items():
         entry = linked_fresh.get(uid) or linked.get(uid) or {}
-        name  = entry.get("riot_name") or f"<@{uid}>"
+        rn, rt = entry.get("riot_name"), entry.get("riot_tag")
+        if rn and rt:
+            name = f"{rn}#{rt}"
+        elif rn:
+            name = rn
+        else:
+            name = f"<@{uid}>"
         delta = ch["delta"]
-        sign  = "+" if delta >= 0 else ""
+        sign = "+" if delta >= 0 else ""
         label = elo_engine.custom_elo_to_rank_label(ch["new"])
-        won   = uid in winner_ids
-        result_icon = "✅" if won else "❌"
-        p_m   = ch.get("perf_mult", 1.0)
+        won = uid in winner_ids
+        result = "Победа" if won else "Поражение"
+        p_m = ch.get("perf_mult", 1.0)
         perf_emoji = "🔥" if p_m >= 1.2 else ("🥶" if p_m <= 0.8 else "🤝")
-        elo_lines.append(
-            f"{result_icon} `{name}`: **{ch['old']}** → **{ch['new']}** "
-            f"({sign}{delta}) · {label} [Импакт: {perf_emoji} {p_m}x]"
+        elo_blocks.append(
+            f"**{name}**\n"
+            f"-# {result} · **{ch['old']}** → **{ch['new']}** ({sign}{delta}) · {label} · {perf_emoji} {p_m}×"
         )
 
-    if elo_lines:
+    if elo_blocks:
         embed.add_field(
-            name="📈 Звание Eblot",
-            value="\n".join(elo_lines),
+            name="📈  Custom ELO",
+            value="\n\n".join(elo_blocks),
             inline=False,
         )
 
     unmatched_count = len(players_raw) - len(matched_stats)
     if unmatched_count > 0:
         embed.set_footer(
-            text=f"{ui_theme.BRAND_FOOTER}  ·  ⚠️ {unmatched_count} не распознано "
-                 "(попроси привязать /link заранее)"
+            text=f"{ui_theme.BRAND_FOOTER} · ⚠️ {unmatched_count} без /link — не в ELO"
         )
 
     # Записываем историю в БД
